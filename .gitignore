@@ -1,0 +1,21 @@
+# 忽略构建产物与大型模型文件
+/target
+/src-tauri/target/
+node_modules/
+dist/
+frontend/node_modules/
+
+# 本地模型源：只忽略大文件（.gguf），保留 models/README.md 与 Modelfile-* 入库
+models/*.gguf
+
+# 本地数据与日志（运行期生成）
+ai-assistant-data/
+data/
+*.log
+
+# 云端密钥（A+C 方案启用云端兜底后防误提交，见 docs/roadmap/18）
+config/secrets.json
+
+# Windows 系统文件
+Thumbs.db
+desktop.ini

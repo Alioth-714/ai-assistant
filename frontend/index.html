@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>小明同学 · ai-assistant</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <aside id="sidebar">
+            <div class="brand">
+                <span class="brand-mark">明</span>
+                <div>
+                    <strong>小明同学</strong>
+                    <small>ai-assistant</small>
+                </div>
+            </div>
+            <ul id="role-list" aria-label="角色列表"></ul>
+            <div class="sidebar-footer">
+                <button id="theme-btn" type="button">切换深色</button>
+            </div>
+        </aside>
+
+        <main id="main-content">
+            <header id="chat-header">
+                <div class="role-heading">
+                    <h1 id="role-title">开发者</h1>
+                    <p id="role-desc">代码 / 文件 / 终端</p>
+                </div>
+                <div class="header-controls">
+                    <span id="backend-info" class="backend-info">未连接后端</span>
+                    <label class="mode-label" for="mode-select">模式</label>
+                    <select id="mode-select">
+                        <option value="mock">Mock</option>
+                        <option value="real" disabled>真实</option>
+                    </select>
+                </div>
+            </header>
+
+            <section id="chat-history" aria-live="polite"></section>
+
+            <div id="composer">
+                <textarea id="input-text" rows="2" placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"></textarea>
+                <div class="composer-actions">
+                    <button id="clear-btn" type="button" class="ghost">清空当前角色</button>
+                    <button id="send-btn" type="button" class="primary">发送</button>
+                </div>
+            </div>
+
+            <div id="status-bar">●3B 未连接 | 判定=- | 置信度=- | Mock 模式 | 0 Agents | 0 待确认 | 角色 dev | 0 条</div>
+        </main>
+
+        <div id="permission-panel" role="dialog" aria-labelledby="perm-title" hidden>
+            <div class="permission-card">
+                <div class="permission-head">
+                    <span id="perm-level" class="permission-badge">L2</span>
+                    <strong id="perm-title">写入确认</strong>
+                </div>
+                <p id="perm-path" class="permission-path"></p>
+                <pre id="perm-preview" class="permission-preview"></pre>
+                <div class="permission-actions">
+                    <button id="perm-deny" type="button" class="ghost">拒绝</button>
+                    <button id="perm-approve" type="button" class="primary">允许写入</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/roles.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>

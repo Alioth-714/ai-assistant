@@ -1,0 +1,44 @@
+{
+  "_comment": "ai-assistant 应用配置模板（JSON：2空格缩进、字段字母序、_comment 注释；权威见 docs/ops/14-开发环境.md §5.2）。router.model=light 档（qwen25-3b）、coordinator.model=heavy 档（qwen25-7b），档位映射权威见 docs/ops/12-模型部署.md §模型池与档位",
+  "app": {
+    "data_dir": "AI_ASSISTANT_DATA",
+    "display_name": "小明同学",
+    "name": "ai-assistant",
+    "version": "0.1.0"
+  },
+  "coordinator": {
+    "compress_trigger_ratio": 0.9,
+    "max_sub_agents": 2,
+    "max_tokens": 8192,
+    "model": "qwen25-7b",
+    "summary_trigger_ratio": 0.7
+  },
+  "logging": {
+    "audit_enabled": true,
+    "level": "info",
+    "output_console": true,
+    "output_file": "logs/app.log"
+  },
+  "router": {
+    "confidence_threshold": 0.5,
+    "max_input_tokens": 4096,
+    "max_output_tokens": 256,
+    "model": "qwen25-3b",
+    "timeout_ms": 2000
+  },
+  "tools": {
+    "backup": {
+      "before_write": true,
+      "enabled": true
+    },
+    "base_dirs": {
+      "knowledge": "knowledge/",
+      "memory": "memory/",
+      "workspace": "workspace/"
+    },
+    "git": {
+      "auto_commit_message": true,
+      "method": "cli"
+    }
+  }
+}

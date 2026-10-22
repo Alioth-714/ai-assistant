@@ -1,0 +1,32 @@
+{
+  "_comment": "模型档位映射模板（B+D）：角色 YAML 只声明档位（light/heavy/cloud），具体模型由本表决定。权威见 docs/ops/12-模型部署.md §模型池与档位；换机/升级只改本表，角色与人设不动（模型纯净原则）。heavy=运行时主协调者（大脑，qwen25-7b）；dev=开发期 Cline 工具模型（qwen3:8b，非运行时档位，仅 Cline/开发用）；cloud 为 null = 阶段0-2 纯本地不启用。",
+  "models_dir": "{程序目录}/models",
+  "grades": {
+    "light": "qwen25-3b",
+    "heavy": "qwen25-7b",
+    "dev": "qwen3:8b",
+    "cloud": null
+  },
+  "installed": {
+    "qwen25-3b": {
+      "grade": "light",
+      "quantization": "Q4_K_M",
+      "size_gb": 2.5
+    },
+    "qwen25-7b": {
+      "grade": "heavy",
+      "quantization": "Q4_K_M",
+      "size_gb": 5.0
+    },
+    "qwen3:8b": {
+      "grade": "dev",
+      "quantization": "Q4_K_M",
+      "size_gb": 5.0
+    },
+    "nomic-embed-text": {
+      "grade": "embedding",
+      "quantization": "F16",
+      "size_gb": 0.3
+    }
+  }
+}
