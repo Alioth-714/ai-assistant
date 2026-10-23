@@ -39,6 +39,17 @@
                 </div>
             </header>
 
+            <section id="env-banner" class="env-banner" role="status" hidden>
+                <div class="env-copy">
+                    <strong id="env-title">本地模型未就绪</strong>
+                    <span id="env-detail"></span>
+                </div>
+                <div class="env-actions">
+                    <button id="env-retry" type="button" class="ghost">重试检测</button>
+                    <button id="env-dismiss" type="button" class="ghost">稍后</button>
+                </div>
+            </section>
+
             <section id="chat-history" aria-live="polite"></section>
 
             <div id="composer">
@@ -62,6 +73,7 @@
                 <pre id="perm-preview" class="permission-preview"></pre>
                 <div class="permission-actions">
                     <button id="perm-deny" type="button" class="ghost">拒绝</button>
+                    <button id="perm-allow-file" type="button" class="ghost">本会话允许此文件</button>
                     <button id="perm-approve" type="button" class="primary">允许写入</button>
                 </div>
             </div>

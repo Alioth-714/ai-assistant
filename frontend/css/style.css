@@ -434,12 +434,136 @@ textarea {
 
 .permission-actions {
     display: flex;
+    flex-wrap: wrap;
     justify-content: flex-end;
     gap: 10px;
 }
 
 .permission-actions .ghost {
     width: auto;
+}
+
+.env-banner {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--warn);
+    border-radius: 10px;
+    background: rgba(190, 120, 20, 0.1);
+}
+
+.env-banner[hidden] {
+    display: none;
+}
+
+.env-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.env-copy strong {
+    color: var(--warn);
+}
+
+.env-copy span {
+    color: var(--text-muted);
+    word-break: break-word;
+    white-space: pre-line;
+}
+
+.env-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 8px;
+}
+
+.env-actions .ghost {
+    width: auto;
+}
+
+.task-card {
+    width: min(88%, 780px);
+    margin: 10px 0 4px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface-muted);
+}
+
+.task-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.task-title {
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+}
+
+.task-status {
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.task-card.is-done .task-status {
+    color: var(--ok);
+}
+
+.task-card.is-failed .task-status {
+    color: var(--warn);
+}
+
+.task-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.task-step {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.task-badge {
+    flex: 0 0 auto;
+    min-width: 62px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: rgba(127, 127, 127, 0.12);
+    color: var(--text-muted);
+    font-size: 10px;
+    text-align: center;
+}
+
+.task-step.task-success .task-badge {
+    color: var(--ok);
+}
+
+.task-step.task-error .task-badge {
+    color: var(--warn);
+}
+
+.task-text {
+    min-width: 0;
+    word-break: break-word;
 }
 
 #status-bar {

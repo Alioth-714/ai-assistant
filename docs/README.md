@@ -98,7 +98,7 @@ AI_ASSISTANT_DATA/
 
 1. **数据默认不出本机**；云端只接脱敏描述
 2. **写操作必须走权限网关**（L2 confirm，写前备份+文件锁）
-3. **数据根**：`AI_ASSISTANT_DATA` 环境变量优先，否则 `{程序目录}/data/`
+3. **数据根**：`AI_ASSISTANT_DATA` 环境变量优先；否则 debug 用 `{仓库目录}/data/`，release Windows 用 `%LOCALAPPDATA%\ai-assistant-data`，其他平台用 `$HOME/.local/share/ai-assistant/data`
 4. **阶段 0-2 以本地推理为主**，不直加载 GGUF；「生成」环节本地不足时，按 `roadmap/18-本地云端边界方案.md` 走云端兜底（脱敏 + 用户确认）
 5. **配置格式**：JSON（人读友好，缩进 2 空格）
 6. **前端**：纯 HTML+CSS+JS（Tauri v1 承载）

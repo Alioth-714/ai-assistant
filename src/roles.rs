@@ -1,5 +1,7 @@
 use std::path::Path;
 
+const EMBEDDED_AGENT_PERSONA: &str = include_str!("../docs/agent.md");
+
 pub const DEFAULT_ROLE: &str = "dev";
 pub const ROLE_IDS: [&str; 3] = ["dev", "general", "custom-role"];
 
@@ -19,13 +21,13 @@ pub fn display_name(role: &str) -> &'static str {
 pub fn system_prompt(role: &str, app_root: &Path) -> String {
     if role == "dev" {
         let persona_path = app_root.join("docs").join("agent.md");
-        if let Ok(text) = std::fs::read_to_string(&persona_path) {
-            let excerpt: String = text.chars().take(1200).collect();
-            tracing::debug!(path = %persona_path.display(), chars = excerpt.chars().count(), "loaded dev persona");
-            return format!(
-                "{excerpt}\n\n当前角色：开发者。请用中文简洁、准确地回答，优先给出可执行方案。"
-            );
-        }
+        let text = std::fs::read_to_string(&persona_path)
+            .unwrap_or_else(|_| EMBEDDED_AGENT_PERSONA.to_string());
+        let excerpt: String = text.chars().take(1200).collect();
+        tracing::debug!(path = %persona_path.display(), chars = excerpt.chars().count(), "loaded dev persona");
+        return format!(
+            "{excerpt}\n\n当前角色：开发者。请用中文简洁、准确地回答，优先给出可执行方案。"
+        );
     }
 
     match role {

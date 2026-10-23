@@ -29,15 +29,26 @@ impl PermissionLevel {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionRequest {
+    #[serde(rename = "requestId")]
     pub id: String,
     pub tool: String,
     pub level: String,
+    #[serde(rename = "target")]
     pub path: String,
     pub preview: String,
+    pub agent: String,
 }
 
 impl PermissionRequest {
     pub fn write(path: impl Into<String>, preview: impl Into<String>) -> Self {
+        Self::write_by("coordinator", path, preview)
+    }
+
+    pub fn write_by(
+        agent: impl Into<String>,
+        path: impl Into<String>,
+        preview: impl Into<String>,
+    ) -> Self {
         Self {
             id: format!(
                 "perm-{}-{}",
@@ -48,6 +59,7 @@ impl PermissionRequest {
             level: PermissionLevel::L2.as_str().to_string(),
             path: path.into(),
             preview: preview.into(),
+            agent: agent.into(),
         }
     }
 }
@@ -86,5 +98,27 @@ pub async fn confirm_write(
     match tokio::time::timeout(WRITE_CONFIRM_TIMEOUT, receiver).await {
         Ok(Ok(approved)) => approved,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PermissionRequest;
+
+    #[test]
+    fn serializes_frontend_contract_fields() {
+        let request = PermissionRequest::write("data/workspace/demo.txt", "- old\n+ new");
+        let value = serde_json::to_value(&request).expect("serialize permission request");
+
+        assert!(value.get("requestId").is_some());
+        assert!(value.get("target").is_some());
+        assert_eq!(
+            value.get("agent").and_then(|item| item.as_str()),
+            Some("coordinator")
+        );
+        assert_eq!(
+            value.get("level").and_then(|item| item.as_str()),
+            Some("L2")
+        );
     }
 }

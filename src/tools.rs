@@ -1,9 +1,11 @@
+use crate::audit;
 use crate::error::{AppError, Result};
+use crate::file_lock::FileLock;
+use crate::ollama::ToolDefinition;
 use crate::permissions::{confirm_write, PermissionLevel, PermissionPrompt, PermissionRequest};
 use crate::util::now_ms;
 use serde_json::{json, Value};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -15,6 +17,8 @@ struct Outcome {
     payload: Value,
     path: Option<String>,
     backup: Option<String>,
+    target_path: Option<PathBuf>,
+    backup_path: Option<PathBuf>,
 }
 
 pub struct ToolExecution {
@@ -22,6 +26,8 @@ pub struct ToolExecution {
     pub ok: bool,
     pub path: Option<String>,
     pub backup: Option<String>,
+    pub target_path: Option<PathBuf>,
+    pub backup_path: Option<PathBuf>,
     pub elapsed_ms: u64,
     pub payload: Value,
 }
@@ -36,6 +42,8 @@ pub struct ToolExecutor<'a> {
     app_root: PathBuf,
     data_root: PathBuf,
     prompt: Option<&'a dyn PermissionPrompt>,
+    agent: String,
+    task_id: Option<String>,
 }
 
 impl<'a> ToolExecutor<'a> {
@@ -52,7 +60,15 @@ impl<'a> ToolExecutor<'a> {
                 .canonicalize()
                 .unwrap_or_else(|_| data_root.to_path_buf()),
             prompt,
+            agent: "coordinator".to_string(),
+            task_id: None,
         }
+    }
+
+    pub fn with_agent(mut self, agent: impl Into<String>, task_id: Option<String>) -> Self {
+        self.agent = agent.into();
+        self.task_id = task_id;
+        self
     }
 
     pub async fn execute(&self, name: &str, args: Value) -> ToolExecution {
@@ -72,17 +88,21 @@ impl<'a> ToolExecutor<'a> {
             _ => Err(AppError::InvalidInput(format!("未知工具：{name}"))),
         };
 
-        let (ok, payload, path, backup) = match result {
+        let (ok, payload, path, backup, target_path, backup_path) = match result {
             Ok(outcome) => (
                 true,
                 outcome.payload,
                 outcome.path.or(raw_path),
                 outcome.backup,
+                outcome.target_path,
+                outcome.backup_path,
             ),
             Err(err) => (
                 false,
                 json!({"ok": false, "error": err.to_string()}),
                 raw_path,
+                None,
+                None,
                 None,
             ),
         };
@@ -92,6 +112,7 @@ impl<'a> ToolExecutor<'a> {
 
         tracing::info!(
             tool = name,
+            agent = %self.agent,
             ok,
             path = path.as_deref().unwrap_or("-"),
             backup = backup.as_deref().unwrap_or("-"),
@@ -104,6 +125,8 @@ impl<'a> ToolExecutor<'a> {
             ok,
             path,
             backup,
+            target_path,
+            backup_path,
             elapsed_ms,
             payload,
         }
@@ -143,6 +166,8 @@ impl<'a> ToolExecutor<'a> {
             }),
             path: Some(display),
             backup: None,
+            target_path: Some(path),
+            backup_path: None,
         })
     }
 
@@ -214,12 +239,22 @@ impl<'a> ToolExecutor<'a> {
             ),
         };
 
-        let request = PermissionRequest::write(display.clone(), preview);
+        let request = PermissionRequest::write_by(self.agent.clone(), display.clone(), preview);
         if !confirm_write(self.prompt, request).await {
             return Err(AppError::InvalidInput(
                 "写入需要用户确认，但确认被拒绝或等待超时".to_string(),
             ));
         }
+
+        let task_id = self.task_id.as_deref().unwrap_or("task_single");
+        let _lock = FileLock::acquire(
+            &self.data_root.join("workspace").join(".locks"),
+            &self.data_root,
+            &path,
+            &self.agent,
+            task_id,
+        )
+        .await?;
 
         let backup = if old_content.is_some() {
             Some(self.backup_file(&path)?)
@@ -262,6 +297,8 @@ impl<'a> ToolExecutor<'a> {
             }),
             path: Some(display),
             backup: backup_display,
+            target_path: Some(path),
+            backup_path: backup,
         })
     }
 
@@ -367,27 +404,25 @@ impl<'a> ToolExecutor<'a> {
         backup: Option<&str>,
         error: Option<&str>,
     ) {
-        let record = json!({
-            "ts": now_ms(),
-            "tool": tool,
-            "level": level.as_str(),
-            "path": path,
-            "result": if ok { "success" } else { "error" },
-            "backup_path": backup,
-            "error": error
-        });
-        let log_path = self.data_root.join("logs").join("audit.log");
-        if let Some(parent) = log_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        match OpenOptions::new().create(true).append(true).open(&log_path) {
-            Ok(mut file) => {
-                if let Err(err) = writeln!(file, "{record}") {
-                    tracing::warn!(error = %err, "audit log write failed");
-                }
-            }
-            Err(err) => tracing::warn!(error = %err, "audit log open failed"),
-        }
+        audit::append(
+            &self.data_root,
+            json!({
+                "ts": now_ms(),
+                "event": "tool_call",
+                "agent": self.agent.as_str(),
+                "actor": self.agent.as_str(),
+                "tool": tool,
+                "action": tool,
+                "path": path,
+                "target": path,
+                "permission": level.as_str(),
+                "level": level.as_str(),
+                "result": if ok { "success" } else { "error" },
+                "backup_path": backup,
+                "task_id": self.task_id.as_deref(),
+                "error": error
+            }),
+        );
     }
 }
 
@@ -503,6 +538,88 @@ fn truncate(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
+pub fn restore_backup(
+    data_root: &Path,
+    backup: &Path,
+    target: &Path,
+    agent: &str,
+    task_id: &str,
+) -> Result<()> {
+    let bytes = fs::read(backup).map_err(|err| {
+        AppError::Io(std::io::Error::new(
+            err.kind(),
+            format!("读取备份 {} 失败：{err}", backup.display()),
+        ))
+    })?;
+    write_atomic(target, &bytes)?;
+    let restored = fs::read(target)?;
+    if restored != bytes {
+        return Err(AppError::Io(std::io::Error::other(format!(
+            "回滚校验失败：{}",
+            target.display()
+        ))));
+    }
+
+    audit::event(
+        data_root,
+        "rollback",
+        agent,
+        "restore_file",
+        "success",
+        json!({
+            "target": target.display().to_string(),
+            "backup": backup.display().to_string(),
+            "task_id": task_id
+        }),
+    );
+    Ok(())
+}
+
+pub fn tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition::new(
+            "read_file",
+            "读取项目或数据目录内的 UTF-8 文本文件，返回原始内容。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对于项目根目录的文件路径，例如 frontend/index.html"
+                    }
+                },
+                "required": ["path"]
+            }),
+        ),
+        ToolDefinition::new(
+            "write_file",
+            "写入或修改项目或数据目录内的 UTF-8 文本文件。修改单行时用 line + text；整体重写时用 content。写前会自动备份，并要求用户确认。",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "相对于项目根目录的文件路径"
+                    },
+                    "line": {
+                        "type": "integer",
+                        "description": "要替换的 1-based 行号，仅修改单行时使用"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "替换后的整行文本，必须与 line 一起使用"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "完整的新文件内容，仅在整体重写时使用"
+                    }
+                },
+                "required": ["path"]
+            }),
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +647,24 @@ mod tests {
         assert!(ensure_not_sensitive(Path::new(".env")).is_err());
         assert!(ensure_not_sensitive(Path::new("keys/server.pem")).is_err());
         assert!(ensure_not_sensitive(Path::new("src/main.rs")).is_ok());
+    }
+
+    #[test]
+    fn restores_target_from_backup() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-assistant-rollback-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let target = root.join("target.txt");
+        let backup = root.join("backup.bak");
+        fs::write(&target, "new content").expect("write target");
+        fs::write(&backup, "old content").expect("write backup");
+
+        restore_backup(&root, &backup, &target, "coordinator", "task_test")
+            .expect("restore backup");
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old content");
+        let _ = fs::remove_dir_all(&root);
     }
 }

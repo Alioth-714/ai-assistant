@@ -13,7 +13,7 @@
 
 - 数据默认不出本机；云端只接脱敏描述
 - 写操作必须走权限网关（L2 confirm）
-- 数据根：`AI_ASSISTANT_DATA` 环境变量或 `{程序目录}/data/`
+- 数据根：`AI_ASSISTANT_DATA` 环境变量优先；否则 debug 用 `{仓库目录}/data/`，release Windows 用 `%LOCALAPPDATA%\ai-assistant-data`，其他平台用 `$HOME/.local/share/ai-assistant/data`
 - 本地/云端边界按 `roadmap/18-本地云端边界方案.md`（读/检索/工具永远本地，仅「生成」环节可按需上云兜底）；阶段 0-2 以本地推理为主，不直加载 GGUF
 - 配置文件格式：JSON（缩进 2 空格）
 - 知识文件格式：结构化 JSON

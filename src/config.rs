@@ -37,6 +37,8 @@ pub struct RouterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinatorConfig {
     pub model: String,
+    #[serde(default = "default_sub_agent_model")]
+    pub sub_agent_model: String,
     #[serde(default = "default_coordinator_tokens")]
     pub max_tokens: u32,
     #[serde(default = "default_max_sub_agents")]
@@ -122,6 +124,10 @@ fn default_confidence_threshold() -> f64 {
     0.5
 }
 
+fn default_sub_agent_model() -> String {
+    "qwen25-3b:latest".to_string()
+}
+
 fn default_coordinator_tokens() -> u32 {
     8192
 }
@@ -142,6 +148,9 @@ fn default_true() -> bool {
     true
 }
 
+const EMBEDDED_APP_CONFIG: &str = include_str!("../config/app.json");
+const EMBEDDED_MODELS_CONFIG: &str = include_str!("../config/models.json");
+
 pub fn app_root() -> PathBuf {
     if let Ok(value) = std::env::var("AI_ASSISTANT_HOME") {
         if !value.trim().is_empty() {
@@ -156,9 +165,7 @@ pub fn app_root() -> PathBuf {
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            if dir.join("config").join("app.json").exists() {
-                return dir.to_path_buf();
-            }
+            return dir.to_path_buf();
         }
     }
 
@@ -169,10 +176,22 @@ pub fn load(root: &Path) -> Result<(AppConfig, ModelsConfig)> {
     let app_path = root.join("config").join("app.json");
     let models_path = root.join("config").join("models.json");
 
-    let app_text = std::fs::read_to_string(&app_path)
-        .map_err(|err| AppError::Config(format!("读取 {} 失败：{err}", app_path.display())))?;
-    let models_text = std::fs::read_to_string(&models_path)
-        .map_err(|err| AppError::Config(format!("读取 {} 失败：{err}", models_path.display())))?;
+    let app_text = std::fs::read_to_string(&app_path).unwrap_or_else(|err| {
+        tracing::warn!(
+            path = %app_path.display(),
+            error = %err,
+            "config file unavailable, using embedded defaults"
+        );
+        EMBEDDED_APP_CONFIG.to_string()
+    });
+    let models_text = std::fs::read_to_string(&models_path).unwrap_or_else(|err| {
+        tracing::warn!(
+            path = %models_path.display(),
+            error = %err,
+            "models file unavailable, using embedded defaults"
+        );
+        EMBEDDED_MODELS_CONFIG.to_string()
+    });
 
     let mut app: AppConfig = serde_json::from_str(&app_text)
         .map_err(|err| AppError::Config(format!("解析 {} 失败：{err}", app_path.display())))?;

@@ -11,6 +11,7 @@
     "max_sub_agents": 2,
     "max_tokens": 8192,
     "model": "qwen25-7b",
+    "sub_agent_model": "qwen25-3b",
     "summary_trigger_ratio": 0.7
   },
   "logging": {

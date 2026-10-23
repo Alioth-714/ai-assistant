@@ -25,6 +25,10 @@
     var historyLoaded = {};
     var permissionQueue = [];
     var activePermission = null;
+    var activeTaskCard = null;
+    var activeTaskId = null;
+    var taskRole = null;
+    var envDismissed = false;
     var els = {};
 
     function $(id) {
@@ -106,7 +110,8 @@
     }
 
     function showPermission(request) {
-        if (!request || !request.id) {
+        var requestId = request && (request.requestId || request.id);
+        if (!requestId) {
             return;
         }
         if (activePermission) {
@@ -116,34 +121,41 @@
 
         activePermission = request;
         els.permLevel.textContent = request.level || "L2";
-        els.permPath.textContent = request.path || "";
+        els.permPath.textContent = request.target || request.path || "";
         els.permPreview.textContent = request.preview || "";
         els.permPanel.hidden = false;
         pendingConfirm += 1;
         updateStatus("等待写入确认");
     }
 
-    function resolvePermission(approved) {
+    function resolvePermission(action) {
         var request = activePermission;
         if (!request) {
             return;
         }
 
+        var requestId = request.requestId || request.id;
         activePermission = null;
         els.permPanel.hidden = true;
         pendingConfirm = Math.max(0, pendingConfirm - 1);
 
         if (invokeFn) {
-            invokeFn("resolve_permission", {
-                id: request.id,
-                approved: approved
+            invokeFn("confirm_permission", {
+                requestId: requestId,
+                action: action
             }).catch(function (err) {
                 var message = err && err.message ? err.message : String(err);
                 updateStatus("确认失败：" + message);
             });
         }
 
-        updateStatus(approved ? "已允许写入" : "已拒绝写入");
+        if (action === "deny") {
+            updateStatus("已拒绝写入");
+        } else if (action === "allow_file") {
+            updateStatus("本会话已允许此文件写入");
+        } else {
+            updateStatus("已允许写入");
+        }
         if (permissionQueue.length) {
             showPermission(permissionQueue.shift());
         }
@@ -157,8 +169,112 @@
         if (!eventApi || typeof eventApi.listen !== "function") {
             return;
         }
-        eventApi.listen("permission-request", function (event) {
+        eventApi.listen("permission_request", function (event) {
             showPermission(event && event.payload);
+        }).catch(function () {
+            /* event bridge unavailable */
+        });
+    }
+
+    function taskStageLabel(stage) {
+        var labels = {
+            planning: "拆解中",
+            planned: "已拆解",
+            subtask_start: "执行中",
+            subtask_complete: "子任务完成",
+            rollback: "回滚",
+            summarizing: "汇总中",
+            done: "完成",
+            failed: "失败"
+        };
+        return labels[stage] || stage || "进度";
+    }
+
+    function ensureTaskCard(taskId) {
+        if (activeTaskCard && activeTaskId === taskId) {
+            return activeTaskCard;
+        }
+        if (!els.history || taskRole !== currentRole) {
+            return null;
+        }
+        var card = document.createElement("div");
+        card.className = "task-card";
+        card.dataset.taskId = taskId || "";
+
+        var head = document.createElement("div");
+        head.className = "task-head";
+        var title = document.createElement("span");
+        title.className = "task-title";
+        title.textContent = "任务进度";
+        var status = document.createElement("span");
+        status.className = "task-status";
+        status.textContent = "进行中";
+        head.appendChild(title);
+        head.appendChild(status);
+
+        var steps = document.createElement("div");
+        steps.className = "task-steps";
+        card.appendChild(head);
+        card.appendChild(steps);
+
+        var typing = els.history.querySelector(".message.typing");
+        if (typing) {
+            els.history.insertBefore(card, typing);
+        } else {
+            els.history.appendChild(card);
+        }
+        activeTaskCard = card;
+        activeTaskId = taskId || null;
+        return card;
+    }
+
+    function onTaskProgress(progress) {
+        if (!progress || !progress.taskId) {
+            return;
+        }
+        if (taskRole && taskRole !== currentRole) {
+            return;
+        }
+        var card = ensureTaskCard(progress.taskId);
+        if (!card) {
+            return;
+        }
+
+        var steps = card.querySelector(".task-steps");
+        var row = document.createElement("div");
+        row.className = "task-step task-" + (progress.status || "running");
+        var badge = document.createElement("span");
+        badge.className = "task-badge";
+        badge.textContent = taskStageLabel(progress.stage);
+        var text = document.createElement("span");
+        text.className = "task-text";
+        text.textContent = (progress.agent ? progress.agent + " · " : "") +
+            (progress.message || "") +
+            (progress.elapsedMs ? " (" + progress.elapsedMs + "ms)" : "");
+        row.appendChild(badge);
+        row.appendChild(text);
+        steps.appendChild(row);
+
+        if (progress.stage === "done" || progress.stage === "failed") {
+            var status = card.querySelector(".task-status");
+            if (status) {
+                status.textContent = progress.stage === "done" ? "完成" : "失败";
+            }
+            card.classList.add(progress.stage === "done" ? "is-done" : "is-failed");
+        }
+        scrollToBottom();
+    }
+
+    function listenTaskProgress() {
+        if (!tauri) {
+            return;
+        }
+        var eventApi = tauri.event || (tauri.core && tauri.core.event);
+        if (!eventApi || typeof eventApi.listen !== "function") {
+            return;
+        }
+        eventApi.listen("task_progress", function (event) {
+            onTaskProgress(event && event.payload);
         }).catch(function () {
             /* event bridge unavailable */
         });
@@ -386,6 +502,9 @@
         }
 
         var roleAtSend = currentRole;
+        taskRole = roleAtSend;
+        activeTaskCard = null;
+        activeTaskId = null;
         els.input.value = "";
         addMessage(roleAtSend, "user", text, "你 · " + timeText());
         sending = true;
@@ -452,10 +571,23 @@
         els.sendBtn.addEventListener("click", sendMessage);
         els.clearBtn.addEventListener("click", clearCurrent);
         els.permApprove.addEventListener("click", function () {
-            resolvePermission(true);
+            resolvePermission("allow");
+        });
+        els.permAllowFile.addEventListener("click", function () {
+            resolvePermission("allow_file");
         });
         els.permDeny.addEventListener("click", function () {
-            resolvePermission(false);
+            resolvePermission("deny");
+        });
+        els.envRetry.addEventListener("click", function () {
+            envDismissed = false;
+            checkEnvironment();
+        });
+        els.envDismiss.addEventListener("click", function () {
+            envDismissed = true;
+            if (els.envBanner) {
+                els.envBanner.hidden = true;
+            }
         });
 
         els.input.addEventListener("keydown", function (event) {
@@ -483,6 +615,65 @@
         });
     }
 
+    function renderEnvironment(report) {
+        if (!els.envBanner) {
+            return;
+        }
+        if (!report || report.ok) {
+            els.envBanner.hidden = true;
+            return;
+        }
+        if (envDismissed) {
+            els.envBanner.hidden = true;
+            return;
+        }
+
+        els.envTitle.textContent = report.ollamaReachable ? "缺少本地模型" : "未连接到 Ollama";
+        var guidance = Array.isArray(report.guidance) ? report.guidance : [];
+        if (!guidance.length && report.error) {
+            guidance = [report.error];
+        }
+        els.envDetail.textContent = guidance.join("\n");
+        els.envBanner.hidden = false;
+    }
+
+    async function checkEnvironment() {
+        if (!invokeFn) {
+            return;
+        }
+        try {
+            var report = await invokeFn("check_environment");
+            realReady = Boolean(report && report.ok);
+            var realOption = els.modeSelect.querySelector('option[value="real"]');
+            if (realOption) {
+                realOption.disabled = !realReady;
+            }
+            if (!realReady && mode === "real") {
+                mode = "mock";
+                els.modeSelect.value = "mock";
+            }
+            renderEnvironment(report);
+            if (realReady) {
+                updateStatus("Ollama 就绪");
+            }
+        } catch (err) {
+            realReady = false;
+            var realOption = els.modeSelect.querySelector('option[value="real"]');
+            if (realOption) {
+                realOption.disabled = true;
+            }
+            if (mode === "real") {
+                mode = "mock";
+                els.modeSelect.value = "mock";
+            }
+            renderEnvironment({
+                ok: false,
+                ollamaReachable: false,
+                guidance: ["环境检测失败：" + (err && err.message ? err.message : String(err))]
+            });
+        }
+    }
+
     async function probeBackend() {
         if (!invokeFn) {
             els.backendInfo.textContent = "浏览器预览";
@@ -496,16 +687,19 @@
             agentCount = Number(status && status.agents) || 0;
             pendingConfirm = Number(status && status.pendingConfirm) || 0;
             var realOption = els.modeSelect.querySelector('option[value="real"]');
-            realOption.disabled = !realReady;
+            if (realOption) {
+                realOption.disabled = !realReady;
+            }
 
             if (realReady) {
                 els.backendInfo.textContent = status.routerModel + " / " + status.coordinatorModel;
                 els.backendInfo.title = "Ollama: " + status.ollamaBaseUrl + "\n数据目录: " + status.dataDir;
                 updateStatus("Ollama " + status.ollamaBaseUrl);
             } else {
-                els.backendInfo.textContent = "Ollama 未连接";
+                var missing = Array.isArray(status.missingModels) ? status.missingModels : [];
+                els.backendInfo.textContent = missing.length ? "缺少模型：" + missing.join("、") : "Ollama 未连接";
                 els.backendInfo.title = "Ollama: " + status.ollamaBaseUrl;
-                updateStatus("请先启动 Ollama");
+                updateStatus(missing.length ? "请拉取缺失模型" : "请先启动 Ollama");
             }
         } catch (err) {
             realReady = false;
@@ -531,7 +725,13 @@
         els.permPath = $("perm-path");
         els.permPreview = $("perm-preview");
         els.permApprove = $("perm-approve");
+        els.permAllowFile = $("perm-allow-file");
         els.permDeny = $("perm-deny");
+        els.envBanner = $("env-banner");
+        els.envTitle = $("env-title");
+        els.envDetail = $("env-detail");
+        els.envRetry = $("env-retry");
+        els.envDismiss = $("env-dismiss");
 
         roles.forEach(function (role) {
             histories[role.id] = [];
@@ -550,9 +750,12 @@
         renderHistory();
         bindEvents();
         listenPermissions();
+        listenTaskProgress();
         updateStatus();
         loadHistory(currentRole);
-        probeBackend();
+        probeBackend().then(function () {
+            checkEnvironment();
+        });
     }
 
     if (document.readyState === "loading") {

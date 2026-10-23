@@ -27,6 +27,24 @@ pub fn root(app_root: &Path) -> PathBuf {
             return PathBuf::from(value);
         }
     }
+    if cfg!(debug_assertions) {
+        return app_root.join("data");
+    }
+
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        if !local.trim().is_empty() {
+            return PathBuf::from(local).join("ai-assistant-data");
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.trim().is_empty() {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("ai-assistant")
+                .join("data");
+        }
+    }
     app_root.join("data")
 }
 
