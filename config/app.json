@@ -27,6 +27,9 @@
     "model": "qwen25-3b",
     "timeout_ms": 2000
   },
+  "testing": {
+    "deterministic": false
+  },
   "tools": {
     "backup": {
       "before_write": true,

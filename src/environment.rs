@@ -99,7 +99,7 @@ mod tests {
         let installed = vec!["qwen25-3b:latest".to_string(), "qwen25-7b".to_string()];
         assert!(model_available(&installed, "qwen25-3b"));
         assert!(model_available(&installed, "qwen25-7b:latest"));
-        assert!(!model_available(&installed, "qwen3:8b"));
+        assert!(!model_available(&installed, "not-installed-model"));
     }
 
     #[test]

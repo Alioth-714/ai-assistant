@@ -3,15 +3,34 @@ use crate::error::{AppError, Result};
 use crate::file_lock::FileLock;
 use crate::ollama::ToolDefinition;
 use crate::permissions::{confirm_write, PermissionLevel, PermissionPrompt, PermissionRequest};
+use crate::render::truncate;
 use crate::util::now_ms;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 const MAX_READ_CHARS: usize = 8_000;
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 单轮工具调用守卫（决策 32 循环检测）：每轮对话开始时重置，
+/// 同一轮内同参数重复调用 ≥3 次直接拦截，避免模型打转。
+static TURN_GUARD: OnceLock<Mutex<crate::guard::LoopDetector>> = OnceLock::new();
+
+fn turn_guard() -> &'static Mutex<crate::guard::LoopDetector> {
+    TURN_GUARD.get_or_init(|| Mutex::new(crate::guard::LoopDetector::new(3)))
+}
+
+/// 每轮对话开始时调用（runtime 在 chat 入口调用），清空上一轮的工具调用记录。
+pub fn begin_turn() {
+    if let Some(guard) = TURN_GUARD.get() {
+        if let Ok(mut detector) = guard.lock() {
+            detector.reset();
+        }
+    }
+}
 
 struct Outcome {
     payload: Value,
@@ -30,6 +49,8 @@ pub struct ToolExecution {
     pub backup_path: Option<PathBuf>,
     pub elapsed_ms: u64,
     pub payload: Value,
+    /// 来源是否敏感（决策 33 隐私红线）：为 true 时内容不得上云，只能本地查看。
+    pub sensitive_source: bool,
 }
 
 impl ToolExecution {
@@ -73,10 +94,55 @@ impl<'a> ToolExecutor<'a> {
 
     pub async fn execute(&self, name: &str, args: Value) -> ToolExecution {
         let started = Instant::now();
+
+        // Tool Guard 前置校验（决策 32）：工具白名单 + 参数 schema，纯确定性、不允许模型绕过。
+        // 来源标记（决策 33）：敏感路径打标，供出网闸门拦截。
+        let sensitive_source = args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(|raw| crate::egress::is_sensitive_path(Path::new(raw)))
+            .unwrap_or(false);
+        if let Err(err) = crate::guard::validate_call(name, &args) {
+            let error = err.to_string();
+            self.audit(name, PermissionLevel::L0, None, false, None, Some(&error));
+            return ToolExecution {
+                name: name.to_string(),
+                ok: false,
+                path: None,
+                backup: None,
+                target_path: None,
+                backup_path: None,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                payload: json!({"ok": false, "error": error}),
+                sensitive_source,
+            };
+        }
+
         let raw_path = args
             .get("path")
             .and_then(Value::as_str)
             .map(ToString::to_string);
+
+        // 循环守卫（决策 32）：同轮内同参数重复调用直接拦截，模型会收到明确错误。
+        if let Ok(mut detector) = turn_guard().lock() {
+            if let Err(err) = detector.check(name, &args) {
+                let error = err.to_string();
+                tracing::warn!(tool = name, error = %error, "tool loop detected");
+                self.audit(name, PermissionLevel::L0, None, false, None, Some(&error));
+                return ToolExecution {
+                    name: name.to_string(),
+                    ok: false,
+                    path: raw_path,
+                    backup: None,
+                    target_path: None,
+                    backup_path: None,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                    payload: json!({"ok": false, "error": error, "loop_detected": true}),
+                    sensitive_source,
+                };
+            }
+        }
+
         let level = match name {
             "write_file" => PermissionLevel::L2,
             _ => PermissionLevel::L0,
@@ -129,6 +195,7 @@ impl<'a> ToolExecutor<'a> {
             backup_path,
             elapsed_ms,
             payload,
+            sensitive_source,
         }
     }
 
@@ -534,10 +601,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
-}
-
 pub fn restore_backup(
     data_root: &Path,
     backup: &Path,
@@ -647,6 +710,34 @@ mod tests {
         assert!(ensure_not_sensitive(Path::new(".env")).is_err());
         assert!(ensure_not_sensitive(Path::new("keys/server.pem")).is_err());
         assert!(ensure_not_sensitive(Path::new("src/main.rs")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn blocks_repeated_identical_tool_call_in_same_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "ai-assistant-loop-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let data_root = root.join("data");
+        fs::create_dir_all(&data_root).expect("create data root");
+        fs::write(root.join("a.txt"), "hello world").expect("write file");
+
+        begin_turn();
+        let prompt = crate::permissions::AutoApprove;
+        let executor = ToolExecutor::new(&root, &data_root, Some(&prompt));
+        let args = json!({"path": "a.txt"});
+
+        assert!(executor.execute("read_file", args.clone()).await.ok);
+        assert!(executor.execute("read_file", args.clone()).await.ok);
+        let third = executor.execute("read_file", args.clone()).await;
+        assert!(!third.ok, "同轮第三次同参数调用应被循环守卫拦截");
+        assert_eq!(third.payload["loop_detected"], true);
+
+        begin_turn(); // 新一轮重置后应恢复正常
+        assert!(executor.execute("read_file", args).await.ok);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

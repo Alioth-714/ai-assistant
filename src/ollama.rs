@@ -1,5 +1,6 @@
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -108,7 +109,7 @@ struct ChatRequest<'a> {
     keep_alive: &'a str,
     options: ChatOptions,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<&'a str>,
+    format: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<&'a [ToolDefinition]>,
 }
@@ -118,6 +119,9 @@ pub struct ChatOptions {
     pub temperature: f32,
     pub num_ctx: u32,
     pub num_predict: u32,
+    /// 固定采样种子（DeepInfer「确定性推理」的等价物）：生产默认不设，测试/阶段验收用固定 seed 复现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
 }
 
 impl Default for ChatOptions {
@@ -126,7 +130,29 @@ impl Default for ChatOptions {
             temperature: 0.3,
             num_ctx: 4096,
             num_predict: 512,
+            seed: None,
         }
+    }
+}
+
+impl ChatOptions {
+    /// 确定性采样：固定 seed + 温度 0，用于测试与阶段验收的可复现性。
+    pub fn deterministic(num_ctx: u32, num_predict: u32) -> Self {
+        Self {
+            temperature: 0.0,
+            num_ctx,
+            num_predict,
+            seed: Some(42),
+        }
+    }
+
+    /// 按配置开关应用确定性采样（`testing.deterministic`）。
+    pub fn with_determinism(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.temperature = 0.0;
+            self.seed = Some(42);
+        }
+        self
     }
 }
 
@@ -200,12 +226,24 @@ impl OllamaClient {
         messages: &[ChatMessage],
         timeout: Duration,
         options: ChatOptions,
-        format: Option<&str>,
+        format: Option<Value>,
     ) -> Result<(String, u64)> {
-        let result = self
-            .send(model, messages, timeout, options, format, None)
-            .await?;
-        Ok((result.message.content, result.elapsed_ms))
+        let schema_mode = matches!(&format, Some(Value::Object(_)));
+        match self
+            .send(model, messages, timeout, options, format.clone(), None)
+            .await
+        {
+            Ok(result) => Ok((result.message.content, result.elapsed_ms)),
+            // 兼容旧版 Ollama：不接受 JSON Schema 对象时回退到 "json"（只重试一次）
+            Err(err) if schema_mode && is_format_rejection(&err) => {
+                tracing::warn!(error = %err, "ollama rejected json schema, retrying with \"json\"");
+                let result = self
+                    .send(model, messages, timeout, options, Some(json!("json")), None)
+                    .await?;
+                Ok((result.message.content, result.elapsed_ms))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn chat_tools(
@@ -226,10 +264,11 @@ impl OllamaClient {
         messages: &[ChatMessage],
         timeout: Duration,
         options: ChatOptions,
-        format: Option<&str>,
+        format: Option<Value>,
         tools: Option<&[ToolDefinition]>,
     ) -> Result<ChatResult> {
         let url = format!("{}/api/chat", self.base_url);
+        let json_mode = format.is_some();
         let request = ChatRequest {
             model,
             messages,
@@ -246,7 +285,7 @@ impl OllamaClient {
             messages = messages.len(),
             prompt_chars,
             num_predict = options.num_predict,
-            json = format.is_some(),
+            json = json_mode,
             tools = tools.map(|tools| tools.len()).unwrap_or(0),
             url = %url,
             "ollama chat request"
@@ -309,10 +348,53 @@ impl OllamaClient {
             temperature: 0.0,
             num_ctx,
             num_predict: 1,
+            seed: None,
         };
         let (_, elapsed_ms) = self
             .chat_with(model, &messages, timeout, options, None)
             .await?;
         Ok(elapsed_ms)
+    }
+}
+
+/// 粗略识别「Ollama 不接受 format」的 400（不同版本报错文案不同）。
+fn is_format_rejection(err: &AppError) -> bool {
+    match err {
+        AppError::Ollama(message) => {
+            let lower = message.to_lowercase();
+            message.contains("400") && (lower.contains("format") || lower.contains("schema"))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_options_serialize_without_seed() {
+        let value = serde_json::to_value(ChatOptions::default()).expect("serialize options");
+        assert!(value.get("seed").is_none(), "默认不应带 seed 字段");
+    }
+
+    #[test]
+    fn deterministic_options_carry_fixed_seed() {
+        let options = ChatOptions::deterministic(2048, 256);
+        let value = serde_json::to_value(options).expect("serialize options");
+        assert_eq!(value["seed"], 42);
+        assert_eq!(value["temperature"], 0.0);
+        assert_eq!(value["num_ctx"], 2048);
+    }
+
+    #[test]
+    fn schema_format_detected_as_rejection_candidate() {
+        let err = AppError::Ollama(
+            "HTTP 400 Bad Request：{\"error\":\"invalid format: schema unsupported\"}".to_string(),
+        );
+        assert!(is_format_rejection(&err));
+
+        let other = AppError::Ollama("HTTP 500".to_string());
+        assert!(!is_format_rejection(&other));
     }
 }

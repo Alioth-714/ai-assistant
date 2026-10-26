@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub coordinator: CoordinatorConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub testing: TestingConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,6 +70,14 @@ impl Default for LoggingConfig {
     }
 }
 
+/// 测试/验收开关（DeepInfer「确定性推理」的等价物）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TestingConfig {
+    /// 确定性采样：固定 seed + 温度 0。测试与阶段验收打开以复现结果，生产默认关闭。
+    #[serde(default)]
+    pub deterministic: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelsConfig {
     #[serde(default)]
@@ -82,7 +92,6 @@ pub struct ModelsConfig {
 pub struct Grades {
     pub light: String,
     pub heavy: String,
-    pub dev: String,
     #[serde(default)]
     pub cloud: Option<String>,
 }
@@ -92,7 +101,6 @@ impl Default for Grades {
         Self {
             light: "qwen25-3b".to_string(),
             heavy: "qwen25-7b".to_string(),
-            dev: "qwen3:8b".to_string(),
             cloud: None,
         }
     }

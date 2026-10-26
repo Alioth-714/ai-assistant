@@ -1,9 +1,15 @@
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::ollama::{ChatMessage, ChatOptions, OllamaClient};
+use crate::render::{extract_json_str, truncate};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::time::{Duration, Instant};
+
+/// 路由层上下文：分类只看消息开头，不需要长上下文（KV cache 减半，首 token 更快）。
+const ROUTER_NUM_CTX: u32 = 2048;
+/// 送进路由的输入截断长度（分类足够，避免长消息撑爆 2K 上下文）。
+const ROUTER_INPUT_CHARS: usize = 1200;
 
 pub const FALLBACK_ROLE: &str = "general";
 pub const FALLBACK_INTENT: &str = "unknown";
@@ -74,18 +80,17 @@ pub async fn route(ollama: &OllamaClient, config: &AppConfig, content: &str) -> 
         return fallback(&model, 0, 0.0, "empty_input");
     }
 
-    let max_chars = (config.router.max_input_tokens as usize)
-        .saturating_mul(2)
-        .clamp(256, 6000);
-    let text: String = text.chars().take(max_chars).collect();
+    let text: String = text.chars().take(ROUTER_INPUT_CHARS).collect();
     let input_chars = text.chars().count();
 
     let timeout = Duration::from_millis(config.router.timeout_ms.max(1));
     let options = ChatOptions {
         temperature: 0.1,
-        num_ctx: config.router.max_input_tokens.max(2048),
+        num_ctx: ROUTER_NUM_CTX,
         num_predict: config.router.max_output_tokens.max(32),
-    };
+        seed: None,
+    }
+    .with_determinism(config.testing.deterministic);
     let messages = [
         ChatMessage::system(ROUTER_SYSTEM_PROMPT),
         ChatMessage::user(text),
@@ -99,7 +104,7 @@ pub async fn route(ollama: &OllamaClient, config: &AppConfig, content: &str) -> 
     );
 
     let result = ollama
-        .chat_with(&model, &messages, timeout, options, Some("json"))
+        .chat_with(&model, &messages, timeout, options, Some(router_schema()))
         .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
 
@@ -120,7 +125,7 @@ pub async fn route(ollama: &OllamaClient, config: &AppConfig, content: &str) -> 
 }
 
 fn parse_decision(raw: &str, model: &str, elapsed_ms: u64, threshold: f64) -> RouterDecision {
-    let Some(json) = extract_json(raw) else {
+    let Some(json) = extract_json_str(raw) else {
         tracing::warn!(output = %truncate(raw, 200), "router output is not json");
         return fallback(model, elapsed_ms, 0.0, "invalid_json");
     };
@@ -245,22 +250,26 @@ fn parse_confidence(value: &Value) -> Option<f64> {
     }
 }
 
-fn extract_json(text: &str) -> Option<&str> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end > start {
-        Some(&trimmed[start..=end])
-    } else {
-        None
-    }
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
+/// 路由输出的 JSON Schema 约束（结构化输出）：消掉「解析失败→重试」的循环。
+fn router_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "role": {
+                "type": "string",
+                "enum": ["dev", "general", "custom-role"]
+            },
+            "intent": {
+                "type": "string",
+                "enum": [
+                    "chat", "task", "role_switch", "config",
+                    "knowledge", "system", "multimodal", "unknown"
+                ]
+            },
+            "confidence": { "type": "number" }
+        },
+        "required": ["role", "intent", "confidence"]
+    })
 }
 
 #[cfg(test)]

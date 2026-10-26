@@ -333,8 +333,10 @@ async fn plan(
                 temperature: 0.1,
                 num_ctx: 4096,
                 num_predict: 768,
-            },
-            None,
+                seed: None,
+            }
+            .with_determinism(context.config.testing.deterministic),
+            Some(planner_schema()),
         )
         .await?;
     tracing::info!(output = %content.chars().take(500).collect::<String>(), "planner output");
@@ -342,7 +344,7 @@ async fn plan(
 }
 
 fn parse_plan(content: &str) -> Option<Vec<SubTask>> {
-    let value = extract_json(content)?;
+    let value = crate::render::extract_json_value(content)?;
     let items = value
         .get("subtasks")
         .or_else(|| value.get("tasks"))
@@ -399,13 +401,28 @@ fn normalize_tools(task: &SubTask) -> Vec<String> {
     tools
 }
 
-fn extract_json(content: &str) -> Option<Value> {
-    let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    if end <= start {
-        return None;
-    }
-    serde_json::from_str(&content[start..=end]).ok()
+/// 拆解输出的 JSON Schema 约束（结构化输出）：降低解析失败与重试。
+fn planner_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "subtasks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "description": { "type": "string" },
+                        "tools": { "type": "array", "items": { "type": "string" } },
+                        "workspaceFiles": { "type": "array", "items": { "type": "string" } },
+                        "expectedOutput": { "type": "string" }
+                    },
+                    "required": ["description"]
+                }
+            }
+        },
+        "required": ["subtasks"]
+    })
 }
 
 fn fallback_plan(message: &str) -> Option<Vec<SubTask>> {
@@ -520,13 +537,13 @@ async fn summarize(
     let system = if memory.is_empty() {
         format!(
             "{}\n\n{}",
-            roles::system_prompt(role, context.app_root),
+            roles::system_prompt(role, context.app_root, context.data_root),
             SUMMARY_SYSTEM_PROMPT
         )
     } else {
         format!(
             "{}\n\n{}\n\n{}",
-            roles::system_prompt(role, context.app_root),
+            roles::system_prompt(role, context.app_root, context.data_root),
             memory,
             SUMMARY_SYSTEM_PROMPT
         )
@@ -547,7 +564,9 @@ async fn summarize(
                 temperature: 0.2,
                 num_ctx: 8192,
                 num_predict: 1024,
-            },
+                seed: None,
+            }
+            .with_determinism(context.config.testing.deterministic),
             None,
         )
         .await

@@ -8,6 +8,8 @@ pub enum AppError {
     Io(#[from] std::io::Error),
     #[error("模型服务不可用：{0}")]
     Ollama(String),
+    #[error("外部模型调用失败：{0}")]
+    External(String),
     #[error("模型调用超时（{0} 秒）")]
     Timeout(u64),
     #[error("参数错误：{0}")]

@@ -41,3 +41,19 @@ pub fn event(
     }
     append(data_root, record);
 }
+
+/// 读取最近的事件（按 `event` 过滤，最新的在前），供界面展示出网记录等。
+pub fn recent(data_root: &Path, event: &str, limit: usize) -> Vec<Value> {
+    let log_path = data_root.join("logs").join("audit.log");
+    let Ok(text) = fs::read_to_string(&log_path) else {
+        return Vec::new();
+    };
+    let mut records: Vec<Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|value| value.get("event").and_then(Value::as_str) == Some(event))
+        .collect();
+    records.reverse();
+    records.truncate(limit.clamp(1, 200));
+    records
+}

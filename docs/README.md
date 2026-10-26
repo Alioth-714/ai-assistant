@@ -40,6 +40,7 @@
 | 测试验收标准 | [roadmap/16-测试验收标准.md](./roadmap/16-测试验收标准.md) |
 | 阶段 Demo 执行计划（实用版） | [roadmap/17-阶段Demo执行计划.md](./roadmap/17-阶段Demo执行计划.md) |
 | 本地/云端能力边界方案 | [roadmap/18-本地云端边界方案.md](./roadmap/18-本地云端边界方案.md) |
+| 阶段 4-5 实施计划（当前） | [roadmap/19-阶段4-5实施计划.md](./roadmap/19-阶段4-5实施计划.md) |
 
 ## 目录结构
 docs/
@@ -82,7 +83,8 @@ docs/
     ├── 15-开发路线.md
     ├── 16-测试验收标准.md
     ├── 17-阶段Demo执行计划.md
-    └── 18-本地云端边界方案.md
+    ├── 18-本地云端边界方案.md
+    └── 19-阶段4-5实施计划.md
 纯文本
 ## 数据目录（运行时）
 AI_ASSISTANT_DATA/
@@ -109,4 +111,4 @@ AI_ASSISTANT_DATA/
 - 当前版本：0.1.0
 - 最后更新：2026-01-15
 - 决策总数：30（见 `design/decisions/01-30-decisions.md`）
-- 文档总数：35 + 1 ADR（含 roadmap/17、18）
+- 文档总数：36 + 1 ADR（含 roadmap/17、18、19）

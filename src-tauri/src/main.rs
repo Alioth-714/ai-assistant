@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use ai_assistant::{
-    bootstrap, AppStatus, ChatReply, EnvironmentReport, LongTermFact, PermissionPrompt,
-    PermissionRequest, ProgressSink, RouterDecision, Runtime, SessionMessage, TaskProgress,
-    TaskSummary,
-};
 use ai_assistant::tasks::TaskStore;
+use ai_assistant::{
+    bootstrap, AppStatus, ChatReply, EnvironmentReport, ExportGate, ExternalChatOutcome,
+    LongTermFact, PermissionPrompt, PermissionRequest, ProgressSink, ProviderInput, ProviderTest,
+    ProviderView, RoleSummary, RouterDecision, Runtime, SaveSettingsResult, SessionDetail,
+    SessionMessage, SessionSummary, SettingsView, TaskProgress, TaskSummary, UserSettings,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -135,10 +136,12 @@ async fn send_message(
     permissions: State<'_, PermissionState>,
     role: String,
     content: String,
+    session_id: Option<String>,
 ) -> Result<ChatReply, String> {
     tracing::info!(
         role = %role,
         chars = content.chars().count(),
+        session_id = ?session_id,
         "frontend requested send_message"
     );
 
@@ -150,7 +153,13 @@ async fn send_message(
     };
 
     match state
-        .chat_with_progress(&role, &content, Some(&prompt), Some(&progress))
+        .chat_with_progress(
+            &role,
+            &content,
+            Some(&prompt),
+            Some(&progress),
+            session_id.as_deref(),
+        )
         .await
     {
         Ok(reply) => Ok(reply),
@@ -220,14 +229,222 @@ fn resolve_permission(
 }
 
 #[tauri::command]
-fn get_history(state: State<'_, Arc<Runtime>>, role: String) -> Result<Vec<SessionMessage>, String> {
-    Ok(state.history(&role))
+fn get_history(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: Option<String>,
+) -> Result<Vec<SessionMessage>, String> {
+    Ok(state.history_for(&role, session_id.as_deref()))
 }
 
 #[tauri::command]
-fn clear_history(state: State<'_, Arc<Runtime>>, role: String) -> Result<(), String> {
-    tracing::info!(role = %role, "frontend requested clear_history");
-    state.clear_history(&role).map_err(|err| err.to_string())
+fn clear_history(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    tracing::info!(role = %role, session_id = ?session_id, "frontend requested clear_history");
+    match session_id.as_deref() {
+        Some(id) => state.clear_session(&role, id),
+        None => state.clear_history(&role),
+    }
+    .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_sessions(state: State<'_, Arc<Runtime>>, role: String) -> Vec<SessionSummary> {
+    state.list_sessions(&role)
+}
+
+#[tauri::command]
+fn create_session(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    title: Option<String>,
+) -> Result<SessionSummary, String> {
+    tracing::info!(role = %role, "frontend requested create_session");
+    state
+        .create_session(&role, title.as_deref())
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_session(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: String,
+) -> Result<SessionDetail, String> {
+    state
+        .session_detail(&role, &session_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn rename_session(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    tracing::info!(role = %role, session_id = %session_id, "frontend requested rename_session");
+    state
+        .rename_session(&role, &session_id, &title)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_session(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: String,
+) -> Result<(), String> {
+    tracing::info!(role = %role, session_id = %session_id, "frontend requested delete_session");
+    state
+        .delete_session(&role, &session_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn get_settings(state: State<'_, Arc<Runtime>>) -> SettingsView {
+    tracing::info!("frontend requested get_settings");
+    state.settings_view()
+}
+
+#[tauri::command]
+fn save_settings(
+    state: State<'_, Arc<Runtime>>,
+    settings: UserSettings,
+) -> Result<SaveSettingsResult, String> {
+    tracing::info!(theme = %settings.theme, "frontend requested save_settings");
+    state.save_settings(settings).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_roles(state: State<'_, Arc<Runtime>>) -> Vec<RoleSummary> {
+    tracing::info!("frontend requested list_roles");
+    state.roles()
+}
+
+#[tauri::command]
+fn save_role(state: State<'_, Arc<Runtime>>, role: RoleSummary) -> Result<RoleSummary, String> {
+    tracing::info!(role = %role.id, "frontend requested save_role");
+    state.save_role(role).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_role(
+    state: State<'_, Arc<Runtime>>,
+    role_id: String,
+    delete_data: bool,
+) -> Result<(), String> {
+    tracing::info!(role = %role_id, delete_data, "frontend requested delete_role");
+    state
+        .delete_role(&role_id, delete_data)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn list_local_models(state: State<'_, Arc<Runtime>>) -> Result<Vec<String>, String> {
+    tracing::info!("frontend requested list_local_models");
+    state
+        .list_local_models()
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn list_providers(state: State<'_, Arc<Runtime>>) -> Vec<ProviderView> {
+    tracing::info!("frontend requested list_providers");
+    state.providers_view()
+}
+
+#[tauri::command]
+fn save_provider(
+    state: State<'_, Arc<Runtime>>,
+    provider: ProviderInput,
+) -> Result<ProviderView, String> {
+    tracing::info!(provider = %provider.id, "frontend requested save_provider");
+    state.save_provider(provider).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn delete_provider(state: State<'_, Arc<Runtime>>, provider_id: String) -> Result<(), String> {
+    tracing::info!(provider = %provider_id, "frontend requested delete_provider");
+    state
+        .delete_provider(&provider_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn test_provider(
+    state: State<'_, Arc<Runtime>>,
+    provider_id: String,
+    force: Option<bool>,
+) -> Result<ProviderTest, String> {
+    tracing::info!(provider = %provider_id, "frontend requested test_provider");
+    state
+        .test_provider(&provider_id, force.unwrap_or(false))
+        .await
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn prepare_external(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    session_id: Option<String>,
+    provider_id: String,
+) -> Result<ExportGate, String> {
+    state
+        .prepare_external(&role, session_id.as_deref(), &provider_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn grant_file_export(
+    state: State<'_, Arc<Runtime>>,
+    role_id: String,
+    provider_id: String,
+) -> Result<(), String> {
+    tracing::info!(role = %role_id, provider = %provider_id, "frontend granted file export");
+    state
+        .grant_file_export(&role_id, &provider_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn revoke_file_export(state: State<'_, Arc<Runtime>>, provider_id: String) -> Result<(), String> {
+    tracing::info!(provider = %provider_id, "frontend revoked file export");
+    state
+        .revoke_file_export(&provider_id)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn send_external_message(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    content: String,
+    session_id: Option<String>,
+    provider_id: String,
+    include_context: bool,
+) -> Result<ExternalChatOutcome, String> {
+    tracing::info!(
+        role = %role,
+        provider = %provider_id,
+        include_context,
+        "frontend requested send_external_message"
+    );
+    state
+        .send_external_message(
+            &role,
+            &content,
+            session_id.as_deref(),
+            &provider_id,
+            include_context,
+        )
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -242,10 +459,45 @@ async fn route_message(
     Ok(state.route(&content).await)
 }
 
+/// 能力分层路由（决策 33）：确定性判定，不调模型。前端用于「仅本地」提示与状态栏。
 #[tauri::command]
-async fn check_environment(
+fn capability_route(
     state: State<'_, Arc<Runtime>>,
-) -> Result<EnvironmentReport, String> {
+    content: String,
+) -> ai_assistant::capabilities::RouteDecision {
+    state.route_decision(&content)
+}
+
+/// 当前能力档位与能力表（设置页展示 / 换硬件后切 profile）
+#[tauri::command]
+fn capability_view(state: State<'_, Arc<Runtime>>) -> ai_assistant::capabilities::Capabilities {
+    state.capabilities_view()
+}
+
+/// 会话云端预算（已用 / 上限）
+#[tauri::command]
+fn cloud_budget(state: State<'_, Arc<Runtime>>) -> ai_assistant::egress::CloudBudget {
+    state.cloud_budget()
+}
+
+/// 出网审计（决策 33）：最近的云端发送 / 拦截记录
+#[tauri::command]
+fn cloud_audit(state: State<'_, Arc<Runtime>>, limit: Option<usize>) -> Vec<serde_json::Value> {
+    ai_assistant::audit::recent(&state.data_root, "cloud_egress", limit.unwrap_or(20))
+}
+
+/// 数据目录迁移（5A）：复制并校验后写指针文件，重启后生效
+#[tauri::command]
+fn set_data_root(
+    state: State<'_, Arc<Runtime>>,
+    path: String,
+) -> Result<ai_assistant::data::MigrationReport, String> {
+    tracing::info!(target = %path, "frontend requested set_data_root");
+    state.set_data_root(&path).map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+async fn check_environment(state: State<'_, Arc<Runtime>>) -> Result<EnvironmentReport, String> {
     tracing::info!("frontend requested check_environment");
     Ok(state.environment().await)
 }
@@ -298,14 +550,38 @@ fn main() {
             get_status,
             send_message,
             route_message,
+            capability_route,
+            capability_view,
+            cloud_budget,
+            cloud_audit,
+            set_data_root,
             confirm_permission,
             resolve_permission,
             get_history,
             clear_history,
+            list_sessions,
+            create_session,
+            get_session,
+            rename_session,
+            delete_session,
             check_environment,
             get_memory,
             list_tasks,
-            get_task
+            get_task,
+            get_settings,
+            save_settings,
+            list_roles,
+            save_role,
+            delete_role,
+            list_local_models,
+            list_providers,
+            save_provider,
+            delete_provider,
+            test_provider,
+            prepare_external,
+            grant_file_export,
+            revoke_file_export,
+            send_external_message
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 窗口失败");

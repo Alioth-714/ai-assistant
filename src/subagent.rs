@@ -2,9 +2,9 @@ use crate::config::AppConfig;
 use crate::coordinator::ToolTrace;
 use crate::ollama::{ChatMessage, ChatOptions, OllamaClient};
 use crate::permissions::PermissionPrompt;
+use crate::render::{normalize_arguments, truncate};
 use crate::tools::{tool_definitions, ToolExecutor};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -99,7 +99,9 @@ pub async fn run_subtask(
         temperature: 0.1,
         num_ctx: 4096,
         num_predict: 768,
-    };
+        seed: None,
+    }
+    .with_determinism(context.config.testing.deterministic);
 
     tracing::info!(
         task_id,
@@ -213,16 +215,4 @@ fn allowed_tools(task: &SubTask) -> Vec<String> {
     } else {
         allowed
     }
-}
-
-fn normalize_arguments(arguments: &Value) -> Value {
-    match arguments {
-        Value::String(text) => serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!({})),
-        Value::Null => serde_json::json!({}),
-        other => other.clone(),
-    }
-}
-
-fn truncate(text: &str, max_chars: usize) -> String {
-    text.chars().take(max_chars).collect()
 }

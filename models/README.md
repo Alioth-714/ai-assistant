@@ -5,7 +5,7 @@
 
 ## 用途
 
-- 把下载好的 GGUF（如 `qwen2.5-3b-instruct-q4_k_m.gguf`、7B 模型文件）放到这里
+- 把下载好的 GGUF（如 `qwen2.5-3b-instruct-q4_k_m.gguf`、`qwen2.5-7b-instruct-q4_k_m.gguf`）放到这里
 - 程序扫描本目录（递归深度 ≤ 5 层），识别可用模型并引导导入 Ollama
 
 ## 模型纯净原则（人设不入模型）
@@ -14,6 +14,17 @@
 - 人设/系统提示词放**配置层**：dev 角色 = `docs/agent.md`；其他角色 = 角色 YAML 的 `prompt:` 字段
 - 导入时 `Modelfile` **只写 `FROM`，不要加 `SYSTEM`**；`ollama show <模型>` 的 System 应为空
 - 换模型 / 换路径 → 人设不变（人设随配置走）
+
+## 运行时模型池（2026-10-22 起，只有一个大脑）
+
+> **用户决定**：显卡有限，**运行时只保留 7B 一个大脑**（heavy 档 = `qwen25-7b`），路由用 3B（light = `qwen25-3b`）。**已移除 dev 档（qwen3:8b）**，不再引入第二个运行档位，避免来回切模型影响体验。`config/models.json` 已同步。
+
+| 档位 | 模型 | 角色 |
+|------|------|------|
+| light（路由） | `qwen25-3b` | 意图分类，常驻 GPU |
+| heavy（大脑） | `qwen25-7b` | 运行时主协调者，**唯一大脑** |
+| embedding | `nomic-embed-text` | 向量检索 |
+| cloud | 阶段 0-2 不启用 | 云端兜底（deepseek-chat，见 `docs/roadmap/18-本地云端边界方案.md`） |
 
 ## 分片 GGUF 需先合并
 
@@ -40,22 +51,10 @@ cd models
 在 `models/` 下建 `Modelfile`，内容只有一行 `FROM ./文件.gguf`（不加 SYSTEM），然后：
 
 ```powershell
-ollama create qwen25-3b -f Modelfile   # 导入 3B（会覆盖旧的带人设版本）
-# 7B：先合并分片 → 把 Modelfile 改成 FROM ./qwen2.5-7b-instruct-q4_k_m.gguf
-ollama create qwen25-7b -f Modelfile
-# qwen3:8b（开发工具档，Qwen3-8B Q4_K_M，原生工具调用可靠；Cline 开发用，**非运行时大脑**）
-ollama create qwen3:8b -f Modelfile-qwen3-8b
-ollama list                            # 确认 light/heavy/dev/embedding
+ollama create qwen25-3b -f Modelfile-3b      # 导入 3B（会覆盖旧的带人设版本）
+ollama create qwen25-7b -f Modelfile-7b      # 导入 7B（大脑）
+ollama list                                  # 确认 light/heavy/embedding
 ```
-
-> **模型角色**：qwen3:8b = 开发期工具（Cline 用）；运行时大脑（heavy 档）= `qwen25-7b`。两者不是一回事（见 `docs/ops/12-模型部署.md` §模型池与档位）。
-
-## qwen3 注意（thinking 默认开）
-
-- qwen3 默认先「思考」再回答（响应含 `thinking` 字段），会变慢、吞 token；工具调用仍正常（原生 `tool_calls`）
-- 本机 Ollama 版本不支持 Modelfile 参数关闭（`enable_thinking` / `think` 均为 unknown parameter）
-- 临时关闭：API 请求带 `think: false`（Cline 不会自动带，agent 用需评估）
-- 模板级永久关闭：后续尝试在 `Modelfile-qwen3-8b` 覆盖 `TEMPLATE`（有风险，改后须回归测工具调用）
 
 > 若想保留旧版带人设的 `qwen25-3b`（CBT 咨询师），导入前先 `ollama cp qwen25-3b qwen25-3b-cbt`。
 

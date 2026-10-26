@@ -1,0 +1,30 @@
+{
+  "_comment": "能力分层配置（决策 33，2026-10-22）。profile=small（3B+7B）：本地只做简单/编排类任务，认知复杂任务默认走云端；升级硬件后切 profile=large（14B+）：本地承担更多，云端仅兜底。grade 取值：local（纯本地，永不出网）/ localFirst（本地先试，失败升级）/ cloud（默认云端）。判定优先级：用户「仅本地」开关 > 静态能力白名单 > 确定性信号（文件数/输入量）> 模型自评（不参与决策）。",
+  "profile": "small",
+  "profiles": {
+    "small": {
+      "capabilities": {
+        "chat_short": { "grade": "local", "note": "闲聊 / 短问答" },
+        "read_write_file": { "grade": "local", "note": "读写文件、单文件改动、模板工作流" },
+        "summarize_short": { "grade": "local", "note": "短文档 / 单段落摘要" },
+        "code_explain": { "grade": "localFirst", "note": "函数级解释 / 注释 / 命名建议" },
+        "ocr_scanned": { "grade": "localFirst", "note": "扫描版 PDF OCR" },
+        "summarize_long": { "grade": "cloud", "note": "长文档跨段落高质量总结" },
+        "code_refactor": { "grade": "cloud", "note": "跨文件重构 / 架构级分析" },
+        "workflow_open_plan": { "grade": "cloud", "note": "开放式多步任务拆解" }
+      }
+    },
+    "large": {
+      "capabilities": {
+        "chat_short": { "grade": "local", "note": "闲聊 / 短问答" },
+        "read_write_file": { "grade": "local", "note": "读写文件、单文件改动、模板工作流" },
+        "summarize_short": { "grade": "local", "note": "短文档 / 单段落摘要" },
+        "code_explain": { "grade": "local", "note": "函数级解释 / 注释 / 命名建议" },
+        "ocr_scanned": { "grade": "localFirst", "note": "扫描版 PDF OCR" },
+        "summarize_long": { "grade": "local", "note": "14B+ 本地可承担长文档总结" },
+        "code_refactor": { "grade": "localFirst", "note": "14B+ 本地优先，失败再上云" },
+        "workflow_open_plan": { "grade": "localFirst", "note": "14B+ 本地优先，失败再上云" }
+      }
+    }
+  }
+}
