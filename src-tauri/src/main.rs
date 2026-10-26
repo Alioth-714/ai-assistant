@@ -496,6 +496,53 @@ fn set_data_root(
     state.set_data_root(&path).map_err(|err| err.to_string())
 }
 
+/// 自动获取 Provider 的模型列表（决策 33 云端对接）
+#[tauri::command]
+async fn fetch_provider_models(
+    state: State<'_, Arc<Runtime>>,
+    base_url: String,
+    api_key: Option<String>,
+    provider_id: Option<String>,
+) -> Result<Vec<String>, String> {
+    state
+        .fetch_provider_models(&base_url, api_key.as_deref(), provider_id.as_deref())
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 内置 Provider 预设（官方直连 / 聚合网关）
+#[tauri::command]
+fn provider_presets() -> Vec<ai_assistant::providers::ProviderPreset> {
+    ai_assistant::providers::presets()
+}
+
+/// 扫描 models 目录里的 GGUF 候选
+#[tauri::command]
+async fn scan_models(
+    state: State<'_, Arc<Runtime>>,
+) -> Result<Vec<ai_assistant::model_import::GgufCandidate>, String> {
+    state.scan_models().await.map_err(|err| err.to_string())
+}
+
+/// 导入一个 GGUF（生成 Modelfile + ollama create + 登记 models.json）
+#[tauri::command]
+async fn import_gguf(
+    state: State<'_, Arc<Runtime>>,
+    request: ai_assistant::model_import::ImportRequest,
+) -> Result<ai_assistant::model_import::ImportResult, String> {
+    tracing::info!(model = %request.model_name, "frontend requested import_gguf");
+    state.import_gguf(request).await.map_err(|err| err.to_string())
+}
+
+/// 打开本地目录（models / data / logs）
+#[tauri::command]
+fn open_local_path(state: State<'_, Arc<Runtime>>, kind: String) -> Result<String, String> {
+    state
+        .open_local_path(&kind)
+        .map(|path| path.display().to_string())
+        .map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 async fn check_environment(state: State<'_, Arc<Runtime>>) -> Result<EnvironmentReport, String> {
     tracing::info!("frontend requested check_environment");
@@ -555,6 +602,11 @@ fn main() {
             cloud_budget,
             cloud_audit,
             set_data_root,
+            fetch_provider_models,
+            provider_presets,
+            scan_models,
+            import_gguf,
+            open_local_path,
             confirm_permission,
             resolve_permission,
             get_history,

@@ -41,6 +41,8 @@ pub struct ProviderInput {
     pub default_model: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -151,6 +153,59 @@ impl ExternalClient {
         Ok(())
     }
 
+    /// 获取该 Provider 的模型列表（自动获取模型的底层实现）。
+    /// 依次尝试 `{base}/models` 与 `{base}/v1/models`，兼容三种返回形态。
+    pub async fn list_models(&self, base_url: &str, api_key: &str) -> Result<Vec<String>> {
+        let base = base_url.trim().trim_end_matches('/');
+        if !(base.starts_with("http://") || base.starts_with("https://")) {
+            return Err(AppError::External(
+                "Base URL 必须以 http:// 或 https:// 开头".to_string(),
+            ));
+        }
+        let mut candidates = vec![endpoint(base, "models")];
+        if !base.ends_with("/v1") {
+            candidates.push(endpoint(base, "v1/models"));
+        }
+
+        let mut last_error = String::from("无法获取模型列表");
+        for url in candidates {
+            let mut request = self.http.get(&url);
+            if !api_key.trim().is_empty() {
+                request = request.bearer_auth(api_key.trim());
+            }
+            let response = match tokio::time::timeout(TEST_TIMEOUT, request.send()).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(err)) => {
+                    last_error = format!("请求 {url} 失败：{err}");
+                    continue;
+                }
+                Err(_) => {
+                    last_error = format!("请求 {url} 超时");
+                    continue;
+                }
+            };
+            let status = response.status();
+            if !status.is_success() {
+                last_error = format!("{url} 返回 HTTP {status}");
+                continue;
+            }
+            let body: serde_json::Value = match response.json().await {
+                Ok(value) => value,
+                Err(err) => {
+                    last_error = format!("{url} 返回内容无法解析：{err}");
+                    continue;
+                }
+            };
+            let models = parse_model_list(&body);
+            if !models.is_empty() {
+                tracing::info!(url = %url, count = models.len(), "provider models fetched");
+                return Ok(models);
+            }
+            last_error = format!("{url} 返回空模型列表");
+        }
+        Err(AppError::External(last_error))
+    }
+
     pub async fn chat(
         &self,
         provider: &ProviderSettings,
@@ -158,6 +213,13 @@ impl ExternalClient {
         model: &str,
         messages: &[(String, String)],
     ) -> Result<ExternalReply> {
+        // 协议守卫：第一版只实现 OpenAI chat/completions
+        if !provider.protocol.trim().is_empty() && provider.protocol != "openai-chat" {
+            return Err(AppError::External(format!(
+                "暂不支持 {} 协议（当前仅支持 openai-chat）；请换用走 chat/completions 的模型",
+                provider.protocol
+            )));
+        }
         let url = endpoint(&provider.base_url, "chat/completions");
         let payload = serde_json::json!({
             "model": model,
@@ -266,7 +328,83 @@ pub fn normalize(input: ProviderInput) -> Result<ProviderSettings> {
         enabled: input.enabled,
         models,
         default_model,
+        protocol: normalize_protocol(input.protocol.as_deref().unwrap_or(""))?,
     })
+}
+
+/// 支持的协议（第一版只实现 openai-chat，其余仅保留字段，调用时明确报错）
+pub const PROTOCOLS: [&str; 3] = ["openai-chat", "openai-responses", "anthropic-messages"];
+
+fn normalize_protocol(raw: &str) -> Result<String> {
+    let value = raw.trim().to_lowercase();
+    if value.is_empty() {
+        return Ok("openai-chat".to_string());
+    }
+    if PROTOCOLS.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(AppError::InvalidInput(format!(
+            "不支持的协议：{raw}（可选：{}）",
+            PROTOCOLS.join(" / ")
+        )))
+    }
+}
+
+/// Provider 预设：`group` 用于界面分组（official=官方直连，gateway=聚合网关）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderPreset {
+    pub id: String,
+    pub name: String,
+    pub group: String,
+    pub base_url: String,
+    pub protocol: String,
+    pub note: String,
+}
+
+fn preset(id: &str, name: &str, group: &str, base_url: &str, note: &str) -> ProviderPreset {
+    ProviderPreset {
+        id: id.to_string(),
+        name: name.to_string(),
+        group: group.to_string(),
+        base_url: base_url.to_string(),
+        protocol: "openai-chat".to_string(),
+        note: note.to_string(),
+    }
+}
+
+/// 内置预设。只列可验证的组合：DeepSeek 官方、OpenCode Zen、火山方舟、自定义网关。
+pub fn presets() -> Vec<ProviderPreset> {
+    vec![
+        preset(
+            "deepseek",
+            "DeepSeek（官方直连）",
+            "official",
+            "https://api.deepseek.com/v1",
+            "官方 OpenAI 兼容接口；模型通常为 deepseek-chat / deepseek-reasoner",
+        ),
+        preset(
+            "opencode-zen",
+            "OpenCode Zen（聚合网关）",
+            "gateway",
+            "https://opencode.ai/zen/v1",
+            "模型目录公开可自动获取；GPT/Claude 走不同协议，本版仅支持 chat/completions 子集",
+        ),
+        preset(
+            "volcano-ark",
+            "火山方舟 Coding（聚合网关）",
+            "gateway",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "按套餐计费；模型名以控制台为准",
+        ),
+        preset(
+            "custom",
+            "自定义 OpenAI 兼容网关",
+            "gateway",
+            "",
+            "Base URL 以 /v1 结尾时自动直接拼 /models 与 /chat/completions",
+        ),
+    ]
 }
 
 pub fn view(
@@ -335,6 +473,33 @@ fn endpoint(base_url: &str, suffix: &str) -> String {
     )
 }
 
+/// 解析模型列表：兼容 OpenAI `{data:[{id}]}`、`{models:[...]}`、裸数组三种形态。
+fn parse_model_list(body: &serde_json::Value) -> Vec<String> {
+    let items = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .or_else(|| body.get("models").and_then(serde_json::Value::as_array))
+        .or_else(|| body.as_array());
+
+    let mut models: Vec<String> = Vec::new();
+    for item in items.into_iter().flatten() {
+        let id = item
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| item.get("name").and_then(serde_json::Value::as_str))
+            .or_else(|| item.as_str());
+        if let Some(id) = id {
+            let id = id.trim();
+            if !id.is_empty() {
+                models.push(id.to_string());
+            }
+        }
+    }
+    models.sort();
+    models.dedup();
+    models
+}
+
 fn extract_content(value: &serde_json::Value) -> Option<String> {
     let message = value.pointer("/choices/0/message/content");
     if let Some(content) = message.and_then(|value| value.as_str()) {
@@ -401,6 +566,7 @@ mod tests {
             enabled: true,
             models: vec!["deepseek-chat".to_string()],
             default_model: "deepseek-chat".to_string(),
+            protocol: "openai-chat".to_string(),
         }
     }
 
@@ -414,6 +580,7 @@ mod tests {
             models: vec![" deepseek-chat ".to_string()],
             default_model: String::new(),
             api_key: None,
+            protocol: None,
         };
         let settings = normalize(input).unwrap();
         assert_eq!(settings.base_url, "https://api.deepseek.com/v1");
@@ -430,8 +597,70 @@ mod tests {
             models: vec!["x".to_string()],
             default_model: "x".to_string(),
             api_key: None,
+            protocol: None,
         };
         assert!(normalize(input).is_err());
+    }
+
+    #[test]
+    fn defaults_protocol_to_openai_chat() {
+        let input = ProviderInput {
+            id: "zen".to_string(),
+            name: "OpenCode Zen".to_string(),
+            base_url: "https://opencode.ai/zen/v1".to_string(),
+            enabled: true,
+            models: vec!["deepseek-v4.1-flash".to_string()],
+            default_model: "deepseek-v4.1-flash".to_string(),
+            api_key: None,
+            protocol: None,
+        };
+        let settings = normalize(input).expect("normalize");
+        assert_eq!(settings.protocol, "openai-chat");
+    }
+
+    #[test]
+    fn rejects_unknown_protocol() {
+        let input = ProviderInput {
+            id: "zen".to_string(),
+            name: "Zen".to_string(),
+            base_url: "https://opencode.ai/zen/v1".to_string(),
+            enabled: true,
+            models: vec!["m".to_string()],
+            default_model: "m".to_string(),
+            api_key: None,
+            protocol: Some("grpc".to_string()),
+        };
+        assert!(normalize(input).is_err());
+    }
+
+    #[test]
+    fn parses_openai_model_list() {
+        let body = serde_json::json!({"object":"list","data":[{"id":"b"},{"id":"a"},{"id":"a"}]});
+        assert_eq!(
+            parse_model_list(&body),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn parses_alternate_model_list_shapes() {
+        let nested = serde_json::json!({"models":[{"name":"x"}]});
+        assert_eq!(parse_model_list(&nested), vec!["x".to_string()]);
+        let bare = serde_json::json!(["m1", "m2"]);
+        assert_eq!(
+            parse_model_list(&bare),
+            vec!["m1".to_string(), "m2".to_string()]
+        );
+    }
+
+    #[test]
+    fn presets_cover_official_and_gateway() {
+        let presets = presets();
+        assert!(presets.iter().any(|item| item.group == "official"));
+        assert!(presets.iter().any(|item| item.group == "gateway"));
+        assert!(presets
+            .iter()
+            .any(|item| item.base_url == "https://opencode.ai/zen/v1"));
     }
 
     #[test]

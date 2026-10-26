@@ -67,6 +67,9 @@ pub struct ProviderSettings {
     pub enabled: bool,
     pub models: Vec<String>,
     pub default_model: String,
+    /// 协议：openai-chat（默认）/ openai-responses / anthropic-messages
+    #[serde(default)]
+    pub protocol: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

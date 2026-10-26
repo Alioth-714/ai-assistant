@@ -11,6 +11,7 @@ pub mod file_lock;
 pub mod guard;
 pub mod logging;
 pub mod memory;
+pub mod model_import;
 pub mod ollama;
 pub mod orchestrator;
 pub mod permissions;

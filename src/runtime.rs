@@ -79,6 +79,14 @@ pub struct ChatReply {
     pub route: Option<RouteDecision>,
 }
 
+/// 比较两个模型名是否等价（忽略 `:latest` 后缀与大小写）
+fn same_model(left: &str, right: &str) -> bool {
+    fn normalize(value: &str) -> String {
+        value.trim().trim_end_matches(":latest").to_lowercase()
+    }
+    !right.trim().is_empty() && normalize(left) == normalize(right)
+}
+
 /// 从计划执行结果里取出最终答复（优先最后一步的 summary）。
 fn planner_content(outputs: &[serde_json::Value]) -> String {
     for value in outputs.iter().rev() {
@@ -124,6 +132,10 @@ pub fn bootstrap() -> Result<Runtime> {
     let session = SessionStore::new(&data_root);
     let memory = LongTermMemory::new(&data_root);
     let providers = ExternalClient::new()?;
+    // 历史明文密钥升级为 DPAPI 密文（失败不影响启动）
+    if let Err(err) = secrets::migrate(&data_root) {
+        tracing::warn!(error = %err, "密钥加密迁移失败，保持原文件不动");
+    }
     // 能力档位与预算从用户设置恢复（决策 33）
     let mut loaded_caps = capabilities::load(&app_root);
     if let Err(err) = loaded_caps.switch_profile(&user_settings.cloud.profile) {
@@ -716,6 +728,116 @@ impl Runtime {
             view: settings::view(&self.data_root, saved),
             restart_required,
         })
+    }
+
+    /// 自动获取 Provider 模型列表；未传 key 时回退到已保存的密钥。
+    pub async fn fetch_provider_models(
+        &self,
+        base_url: &str,
+        api_key: Option<&str>,
+        provider_id: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let key = match api_key.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => value.to_string(),
+            None => provider_id
+                .and_then(|id| secrets::get(&self.data_root, id))
+                .unwrap_or_default(),
+        };
+        self.providers.list_models(base_url, &key).await
+    }
+
+    /// 解析模型目录（支持 `{程序目录}` / `{app_root}` 占位符）
+    pub fn models_dir(&self) -> PathBuf {
+        let raw = self.models.models_dir.trim();
+        if raw.is_empty() {
+            return self.app_root.join("models");
+        }
+        let root = self.app_root.display().to_string();
+        let resolved = raw
+            .replace("{程序目录}", &root)
+            .replace("{app_root}", &root);
+        PathBuf::from(resolved)
+    }
+
+    /// 扫描 models 目录里的 GGUF 候选（含推断的名称/参数量/量化/档位）
+    pub async fn scan_models(&self) -> Result<Vec<crate::model_import::GgufCandidate>> {
+        let dir = self.models_dir();
+        let installed = self
+            .ollama
+            .list_models(Duration::from_millis(1500))
+            .await
+            .unwrap_or_default();
+        Ok(crate::model_import::scan(&dir, &installed))
+    }
+
+    /// 导入一个 GGUF：生成 Modelfile → ollama create → 登记 models.json
+    pub async fn import_gguf(
+        &self,
+        request: crate::model_import::ImportRequest,
+    ) -> Result<crate::model_import::ImportResult> {
+        let dir = self.models_dir();
+        let mut result = crate::model_import::import(&self.app_root, &dir, &request)?;
+
+        // 档位空缺时自动选用新模型（只改选择，不影响已有配置）
+        let installed = self
+            .ollama
+            .list_models(Duration::from_millis(1500))
+            .await
+            .unwrap_or_default();
+        let mut settings = self.current_settings();
+        let mut changed = false;
+        if result.grade == "light"
+            && !installed
+                .iter()
+                .any(|item| same_model(item, &settings.models.router))
+        {
+            settings.models.router = result.model_name.clone();
+            changed = true;
+        }
+        if result.grade == "heavy"
+            && !installed
+                .iter()
+                .any(|item| same_model(item, &settings.models.coordinator))
+        {
+            settings.models.coordinator = result.model_name.clone();
+            changed = true;
+        }
+        if changed {
+            if let Err(err) = self.persist_settings(settings) {
+                tracing::warn!(error = %err, "模型档位写回设置失败");
+            } else {
+                result.switched_selection = true;
+            }
+        }
+        Ok(result)
+    }
+
+    /// 打开本地目录（白名单：models / data / logs）
+    pub fn open_local_path(&self, kind: &str) -> Result<PathBuf> {
+        let path = match kind.trim() {
+            "models" => self.models_dir(),
+            "data" => self.data_root.clone(),
+            "logs" => self.data_root.join("logs"),
+            other => {
+                return Err(AppError::InvalidInput(format!(
+                    "不支持的目录类型：{other}（可选 models / data / logs）"
+                )))
+            }
+        };
+        std::fs::create_dir_all(&path)?;
+        #[cfg(windows)]
+        {
+            std::process::Command::new("explorer")
+                .arg(&path)
+                .spawn()
+                .map_err(|err| {
+                    AppError::Io(std::io::Error::new(
+                        err.kind(),
+                        format!("打开目录失败：{err}"),
+                    ))
+                })?;
+        }
+        Ok(path)
     }
 
     pub fn providers_view(&self) -> Vec<ProviderView> {

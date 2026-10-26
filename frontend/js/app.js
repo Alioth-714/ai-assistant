@@ -41,6 +41,7 @@
     var cloudEscalations = 0;
     var onboardingStep = 0;
     var onboardingShown = false;
+    var pendingImport = null;
     var localModels = [];
     var editingRoleId = null;
     var providers = [];
@@ -980,6 +981,161 @@
             }
         }
         toast(skipped ? "已跳过引导，可随时在设置里调整" : "设置完成，开始使用吧");
+    }
+
+    // ---- 模型扫描与导入 ----
+    async function openLocalPath(kind) {
+        if (!invokeFn) {
+            return;
+        }
+        try {
+            var path = await invokeFn("open_local_path", { kind: kind });
+            if (path) {
+                toast("已打开：" + path);
+            }
+        } catch (err) {
+            toast("打开目录失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
+
+    async function scanModels() {
+        if (!invokeFn) {
+            return;
+        }
+        if (els.scanModelsBtn) {
+            els.scanModelsBtn.disabled = true;
+        }
+        if (els.modelsScanStatus) {
+            els.modelsScanStatus.textContent = "扫描中…";
+        }
+        try {
+            var candidates = await invokeFn("scan_models");
+            renderScanList(candidates || []);
+            if (els.modelsScanStatus) {
+                els.modelsScanStatus.textContent = candidates && candidates.length
+                    ? "发现 " + candidates.length + " 个 GGUF 文件"
+                    : "模型目录里没有找到 .gguf 文件";
+            }
+        } catch (err) {
+            if (els.modelsScanStatus) {
+                els.modelsScanStatus.textContent = "扫描失败：" + (err && err.message ? err.message : String(err));
+            }
+        } finally {
+            if (els.scanModelsBtn) {
+                els.scanModelsBtn.disabled = false;
+            }
+        }
+    }
+
+    function renderScanList(candidates) {
+        if (!els.modelsScanList) {
+            return;
+        }
+        els.modelsScanList.textContent = "";
+        candidates.forEach(function (item) {
+            var row = document.createElement("div");
+            row.className = "settings-row";
+            var left = document.createElement("div");
+            var title = document.createElement("strong");
+            title.textContent = item.relative + "（" + Math.round(item.sizeMb) + " MB）";
+            var hint = document.createElement("span");
+            hint.className = "settings-hint";
+            var detail = "推断：family=" + item.family + " params=" + item.params +
+                " quant=" + (item.quant || "未知") + " → " + item.suggestedName +
+                "（" + item.suggestedGrade + "）";
+            if (item.shard) {
+                detail += " · 分片 " + item.shard + "，需先合并";
+            } else if (item.imported) {
+                detail += " · 已导入";
+            }
+            hint.textContent = detail;
+            left.appendChild(title);
+            left.appendChild(hint);
+            row.appendChild(left);
+
+            if (!item.shard) {
+                var button = document.createElement("button");
+                button.type = "button";
+                button.className = item.imported ? "ghost" : "primary";
+                button.textContent = item.imported ? "重新导入" : "导入";
+                button.addEventListener("click", function () {
+                    openModelImport(item);
+                });
+                row.appendChild(button);
+            }
+            els.modelsScanList.appendChild(row);
+        });
+    }
+
+    function openModelImport(candidate) {
+        if (!els.modelImportForm) {
+            return;
+        }
+        pendingImport = candidate;
+        els.modelImportForm.hidden = false;
+        els.modelImportName.value = candidate.suggestedName;
+        els.modelImportGrade.value = candidate.suggestedGrade;
+        els.modelImportCtx.value = "8192";
+        els.modelImportDisplay.value = candidate.suggestedName;
+        if (els.modelImportPreview) {
+            els.modelImportPreview.textContent =
+                "FROM ./" + candidate.relative + "\nPARAMETER num_ctx 8192\n";
+        }
+        els.modelImportName.focus();
+    }
+
+    function closeModelImport() {
+        if (!els.modelImportForm) {
+            return;
+        }
+        els.modelImportForm.hidden = true;
+        pendingImport = null;
+    }
+
+    async function submitModelImport() {
+        if (!invokeFn || !pendingImport) {
+            return;
+        }
+        var name = els.modelImportName.value.trim().toLowerCase();
+        if (!name) {
+            toast("请填写模型名");
+            return;
+        }
+        var ctx = parseInt(els.modelImportCtx.value, 10);
+        els.modelImportSubmit.disabled = true;
+        if (els.modelsScanStatus) {
+            els.modelsScanStatus.textContent = "正在导入 " + name + "（ollama create 可能需要几十秒）…";
+        }
+        try {
+            var result = await invokeFn("import_gguf", {
+                request: {
+                    relative: pendingImport.relative,
+                    modelName: name,
+                    grade: els.modelImportGrade.value,
+                    numCtx: isNaN(ctx) ? 0 : ctx,
+                    displayName: els.modelImportDisplay.value.trim()
+                }
+            });
+            closeModelImport();
+            await loadLocalModels();
+            await loadSettings();
+            renderSettings();
+            if (els.modelsScanStatus) {
+                els.modelsScanStatus.textContent = "已导入 " + result.modelName +
+                    "（" + result.grade + " / " + Math.round(result.sizeGb * 10) / 10 + " GB）" +
+                    (result.switchedSelection ? "，已设为该档位模型，重启后生效" : "");
+            }
+            toast("模型导入成功");
+            scanModels();
+        } catch (err) {
+            var message = err && err.message ? err.message : String(err);
+            if (els.modelsScanStatus) {
+                els.modelsScanStatus.textContent = "导入失败：" + message;
+            }
+            toast("导入失败：" + message);
+        } finally {
+            els.modelImportSubmit.disabled = false;
+        }
     }
 
     function systemTheme() {        if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) {
@@ -2012,6 +2168,152 @@
         }
     }
 
+    async function loadProviderPresets() {
+        if (!els.providerFormPreset || !invokeFn) {
+            return;
+        }
+        try {
+            var presets = await invokeFn("provider_presets");
+            var select = els.providerFormPreset;
+            select.textContent = "";
+            var placeholder = document.createElement("option");
+            placeholder.value = "";
+            placeholder.textContent = "选择预设…";
+            select.appendChild(placeholder);
+            (presets || []).forEach(function (preset) {
+                var group = select.querySelector('optgroup[data-group="' + preset.group + '"]');
+                if (!group) {
+                    group = document.createElement("optgroup");
+                    group.dataset.group = preset.group;
+                    group.label = preset.group === "official" ? "官方直连" : "聚合代理";
+                    select.appendChild(group);
+                }
+                var option = document.createElement("option");
+                option.value = preset.id;
+                option.textContent = preset.name;
+                option.dataset.baseUrl = preset.baseUrl || "";
+                option.dataset.note = preset.note || "";
+                group.appendChild(option);
+            });
+        } catch (err) {
+            /* 预设加载失败不阻塞手动填写 */
+        }
+    }
+
+    function applyProviderPreset() {
+        if (!els.providerFormPreset) {
+            return;
+        }
+        var options = els.providerFormPreset.selectedOptions;
+        var option = options && options[0];
+        if (!option || !option.value) {
+            return;
+        }
+        if (option.dataset.baseUrl) {
+            els.providerFormBase.value = option.dataset.baseUrl;
+        }
+        if (!els.providerFormId.value.trim() && option.value !== "custom") {
+            els.providerFormId.value = option.value;
+        }
+        if (!els.providerFormName.value.trim()) {
+            els.providerFormName.value = option.textContent;
+        }
+        if (els.providerModelsStatus) {
+            els.providerModelsStatus.textContent = option.dataset.note || "";
+        }
+    }
+
+    function renderModelPicker(models) {
+        if (!els.providerModelsPicker) {
+            return;
+        }
+        var selected = els.providerFormModels.value.split(",").map(function (item) {
+            return item.trim();
+        }).filter(Boolean);
+        els.providerModelsPicker.textContent = "";
+        els.providerModelsPicker.hidden = false;
+        models.forEach(function (model) {
+            var label = document.createElement("label");
+            label.className = "provider-check";
+            var box = document.createElement("input");
+            box.type = "checkbox";
+            box.value = model;
+            box.checked = selected.indexOf(model) !== -1;
+            label.appendChild(box);
+            label.appendChild(document.createTextNode(" " + model));
+            els.providerModelsPicker.appendChild(label);
+        });
+        var actions = document.createElement("div");
+        actions.className = "role-form-actions";
+        var apply = document.createElement("button");
+        apply.type = "button";
+        apply.className = "primary";
+        apply.textContent = "应用所选";
+        apply.addEventListener("click", function () {
+            var picked = Array.prototype.slice
+                .call(els.providerModelsPicker.querySelectorAll('input[type="checkbox"]'))
+                .filter(function (box) {
+                    return box.checked;
+                })
+                .map(function (box) {
+                    return box.value;
+                });
+            els.providerFormModels.value = picked.join(", ");
+            if (!els.providerFormDefault.value.trim() && picked.length) {
+                els.providerFormDefault.value = picked[0];
+            }
+            els.providerModelsPicker.hidden = true;
+            if (els.providerModelsStatus) {
+                els.providerModelsStatus.textContent = "已应用 " + picked.length + " 个模型";
+            }
+        });
+        actions.appendChild(apply);
+        els.providerModelsPicker.appendChild(actions);
+    }
+
+    async function fetchProviderModels() {
+        if (!invokeFn) {
+            return;
+        }
+        var baseUrl = els.providerFormBase.value.trim();
+        if (!baseUrl) {
+            toast("请先填写 Base URL");
+            return;
+        }
+        var apiKey = els.providerFormKey.value.trim();
+        var providerId = els.providerFormId.value.trim();
+        els.providerFetchModels.disabled = true;
+        if (els.providerModelsStatus) {
+            els.providerModelsStatus.textContent = "获取中…";
+        }
+        try {
+            var models = await invokeFn("fetch_provider_models", {
+                baseUrl: baseUrl,
+                apiKey: apiKey ? apiKey : null,
+                providerId: providerId ? providerId : null
+            });
+            if (!models || !models.length) {
+                if (els.providerModelsStatus) {
+                    els.providerModelsStatus.textContent = "未获取到模型，请手动填写";
+                }
+                return;
+            }
+            renderModelPicker(models);
+            if (els.providerModelsStatus) {
+                els.providerModelsStatus.textContent =
+                    "共 " + models.length + " 个模型，勾选后点「应用所选」";
+            }
+        } catch (err) {
+            var message = err && err.message ? err.message : String(err);
+            if (els.providerModelsStatus) {
+                els.providerModelsStatus.textContent = "获取失败：" + message;
+            }
+            toast("获取模型失败：" + message);
+        } finally {
+            els.providerFetchModels.disabled = false;
+        }
+    }
+
     function openProviderForm(provider) {
         if (!els.providerForm) {
             return;
@@ -2022,6 +2324,16 @@
         els.providerFormName.value = provider ? provider.name : "";
         els.providerFormBase.value = provider ? provider.baseUrl : "";
         els.providerFormModels.value = provider ? (provider.models || []).join(", ") : "";
+        if (els.providerModelsPicker) {
+            els.providerModelsPicker.hidden = true;
+            els.providerModelsPicker.textContent = "";
+        }
+        if (els.providerModelsStatus) {
+            els.providerModelsStatus.textContent = "";
+        }
+        if (els.providerFormPreset) {
+            els.providerFormPreset.value = "";
+        }
         els.providerFormDefault.value = provider ? (provider.defaultModel || "") : "";
         els.providerFormKey.value = "";
         els.providerFormEnabled.checked = provider ? provider.enabled : true;
@@ -2517,6 +2829,44 @@
         });
         els.providerFormCancel.addEventListener("click", closeProviderForm);
         els.providerForm.addEventListener("submit", submitProviderForm);
+        if (els.providerFormPreset) {
+            els.providerFormPreset.addEventListener("change", applyProviderPreset);
+        }
+        if (els.providerFetchModels) {
+            els.providerFetchModels.addEventListener("click", fetchProviderModels);
+        }
+        if (els.openModelsDir) {
+            els.openModelsDir.addEventListener("click", function () {
+                openLocalPath("models");
+            });
+        }
+        if (els.openLogsDir) {
+            els.openLogsDir.addEventListener("click", function () {
+                openLocalPath("logs");
+            });
+        }
+        if (els.scanModelsBtn) {
+            els.scanModelsBtn.addEventListener("click", scanModels);
+        }
+        if (els.modelImportCancel) {
+            els.modelImportCancel.addEventListener("click", closeModelImport);
+        }
+        if (els.modelImportSubmit) {
+            els.modelImportSubmit.addEventListener("click", submitModelImport);
+        }
+        if (els.modelImportCtx) {
+            els.modelImportCtx.addEventListener("input", function () {
+                if (!pendingImport || !els.modelImportPreview) {
+                    return;
+                }
+                var ctx = parseInt(els.modelImportCtx.value, 10);
+                var text = "FROM ./" + pendingImport.relative + "\n";
+                if (!isNaN(ctx) && ctx > 0) {
+                    text += "PARAMETER num_ctx " + ctx + "\n";
+                }
+                els.modelImportPreview.textContent = text;
+            });
+        }
         els.externalPickerClose.addEventListener("click", closeProviderPicker);
         els.exportClose.addEventListener("click", closeExportModal);
         els.exportConfirm.addEventListener("click", confirmExport);
@@ -2675,6 +3025,23 @@
         els.providerFormName = $("provider-form-name");
         els.providerFormBase = $("provider-form-base");
         els.providerFormModels = $("provider-form-models");
+        els.providerFormPreset = $("provider-form-preset");
+        els.providerFetchModels = $("provider-fetch-models");
+        els.providerModelsStatus = $("provider-models-status");
+        els.providerModelsPicker = $("provider-models-picker");
+        els.openModelsDir = $("open-models-dir");
+        els.scanModelsBtn = $("scan-models-btn");
+        els.modelsScanStatus = $("models-scan-status");
+        els.modelsScanList = $("models-scan-list");
+        els.modelImportForm = $("model-import-form");
+        els.modelImportName = $("model-import-name");
+        els.modelImportGrade = $("model-import-grade");
+        els.modelImportCtx = $("model-import-ctx");
+        els.modelImportDisplay = $("model-import-display");
+        els.modelImportPreview = $("model-import-preview");
+        els.modelImportCancel = $("model-import-cancel");
+        els.modelImportSubmit = $("model-import-submit");
+        els.openLogsDir = $("open-logs-dir");
         els.providerFormDefault = $("provider-form-default");
         els.providerFormKey = $("provider-form-key");
         els.providerFormEnabled = $("provider-form-enabled");
@@ -2759,6 +3126,7 @@
         });
         loadSettings();
         loadProviders();
+        loadProviderPresets();
     }
 
     if (document.readyState === "loading") {
