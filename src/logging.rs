@@ -26,17 +26,17 @@ pub fn init(data_root: &Path) -> Result<WorkerGuard> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("ai_assistant=info,ai_assistant_app=info,info"));
 
-    // 仅 debug 构建输出 console（生产不刷屏，日志全在文件里）
-    #[cfg(debug_assertions)]
-    let registry = tracing_subscriber::registry().with(filter).with(
+    // 默认不往 console 输出（GUI 程序没有控制台）；带 `--console` 启动时才输出
+    let console_enabled = std::env::var("AI_ASSISTANT_CONSOLE").is_ok();
+    let console_layer = console_enabled.then(|| {
         tracing_subscriber::fmt::layer()
             .with_writer(std::io::stdout)
-            .with_ansi(true),
-    );
-    #[cfg(not(debug_assertions))]
-    let registry = tracing_subscriber::registry().with(filter);
+            .with_ansi(true)
+    });
 
-    let _ = registry
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(file_writer)

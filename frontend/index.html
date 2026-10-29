@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>小明同学 · ai-assistant</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -29,7 +30,7 @@
 
             <section class="sidebar-section usage-section">
                 <div class="section-head">
-                    <span class="section-title">外部模型</span>
+                    <span class="section-title">云端供应商</span>
                     <button id="usage-manage" class="link-btn" type="button">管理</button>
                 </div>
                 <div class="usage-card">
@@ -167,6 +168,89 @@
             </div>
         </div>
 
+        <div id="provider-add-modal" class="modal" role="dialog" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong>手动添加模型</strong>
+                    <button id="provider-add-close" type="button" class="ghost">✕</button>
+                </div>
+                <div class="settings-body">
+                    <p class="modal-note">接口没有返回、但确实可用的模型，可以在这里手动加入。</p>
+                    <input id="provider-add-id" type="text" spellcheck="false" placeholder="官方模型 id（必填，例如 deepseek-flash）">
+                    <input id="provider-add-name" type="text" placeholder="显示名（可选，默认与 id 相同）">
+                </div>
+                <div class="settings-footer">
+                    <span class="settings-status"></span>
+                    <div class="role-form-actions">
+                        <button id="provider-add-cancel" type="button" class="ghost">取消</button>
+                        <button id="provider-add-confirm" type="button" class="primary">添加</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="provider-picker-modal" class="modal" role="dialog" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong>选择要添加的模型</strong>
+                    <button id="provider-picker-close" type="button" class="ghost">✕</button>
+                </div>
+                <div class="settings-body">
+                    <p class="modal-note">以下是模型提供方的可用模型，勾选要添加的模型。</p>
+                    <div class="provider-picker-tools">
+                        <input id="provider-picker-search" type="text" placeholder="搜索模型">
+                        <button id="provider-picker-toggle" type="button" class="ghost">取消全选</button>
+                    </div>
+                    <div id="provider-picker-list" class="provider-picker-list"></div>
+                </div>
+                <div class="settings-footer">
+                    <span id="provider-picker-count" class="settings-status"></span>
+                    <div class="role-form-actions">
+                        <button id="provider-picker-cancel" type="button" class="ghost">取消</button>
+                        <button id="provider-picker-apply" type="button" class="primary">添加所选</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="cloud-gate" class="modal" role="dialog" aria-labelledby="cloud-gate-title" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong id="cloud-gate-title">云端调用较频繁</strong>
+                </div>
+                <div class="settings-body">
+                    <p id="cloud-gate-text" class="modal-note"></p>
+                </div>
+                <div class="settings-footer">
+                    <span class="settings-status">按次计数 · 1 小时窗口</span>
+                    <div class="role-form-actions">
+                        <button id="cloud-gate-local" type="button" class="ghost">改用本地</button>
+                        <button id="cloud-gate-once" type="button" class="primary">继续本次</button>
+                        <button id="cloud-gate-never" type="button" class="ghost">本次运行不再询问</button>
+                        <button id="cloud-gate-cancel" type="button" class="ghost">取消发送</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="restart-notice" class="modal" role="dialog" aria-labelledby="restart-notice-title" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong id="restart-notice-title">数据目录已切换</strong>
+                </div>
+                <div class="settings-body">
+                    <p id="restart-notice-text" class="modal-note"></p>
+                </div>
+                <div class="settings-footer">
+                    <span class="settings-status">关闭后重新打开生效</span>
+                    <div class="role-form-actions">
+                        <button id="restart-now" type="button" class="primary">立即关闭</button>
+                        <button id="restart-abort" type="button" class="ghost">撤销切换</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="toast" class="toast" hidden></div>
 
         <div id="settings-panel" class="modal" role="dialog" aria-labelledby="settings-title" hidden>
@@ -181,7 +265,7 @@
                     <button type="button" class="settings-tab" data-tab="models">模型</button>
                     <button type="button" class="settings-tab" data-tab="roles">角色</button>
                     <button type="button" class="settings-tab" data-tab="data">数据</button>
-                    <button type="button" class="settings-tab" data-tab="external">外部模型</button>
+                    <button type="button" class="settings-tab" data-tab="external">云端供应商</button>
                 </div>
 
                 <div class="settings-body">
@@ -200,6 +284,25 @@
                     </section>
 
                     <section class="settings-tab-panel" data-panel="models">
+<div class="settings-row">
+                            <div>
+                                <strong>默认对话模型</strong>
+                                <span class="settings-hint">发送消息时优先使用本地模型或某个外部 Provider。</span>
+                            </div>
+                            <select id="settings-default-chat">
+                                <option value="local">本地模型</option>
+                            </select>
+                        </div>
+<div class="settings-row">
+                            <div>
+                                <strong>能力档位</strong>
+                                <span class="settings-hint">small = 轻量档（本地为主，复杂任务可上云）；large = 大模型档（本地承担更多）。具体模型由下面的路由/协调模型决定。</span>
+                            </div>
+                            <select id="settings-cloud-profile">
+                                <option value="small">small（轻量档）</option>
+                                <option value="large">large（大模型档）</option>
+                            </select>
+                        </div>
                         <div class="settings-row">
                             <div>
                                 <strong>Ollama 地址</strong>
@@ -227,8 +330,7 @@
                                 <span class="settings-hint">放 GGUF 的位置；点「扫描模型」可把新模型导入 Ollama。</span>
                             </div>
                             <div class="role-form-actions">
-                                <code id="settings-models-dir">-</code>
-                                <button id="open-models-dir" type="button" class="ghost">打开目录</button>
+                                <button id="open-models-dir" type="button" class="primary">打开目录</button>
                                 <button id="scan-models-btn" type="button" class="primary">扫描模型</button>
                             </div>
                         </div>
@@ -256,16 +358,20 @@
                         <div class="settings-role-head">
                             <div>
                                 <strong>角色</strong>
-                                <span class="settings-hint">自定义角色会出现在输入框旁的角色滚轮中。</span>
+                                <span class="settings-hint">内置 4 个 + 自建 4 个（上限 8）；自建角色会出现在输入框旁的角色滚轮中。</span>
                             </div>
                             <button id="role-add-btn" type="button" class="ghost">+ 新建角色</button>
                         </div>
                         <div id="settings-role-list" class="settings-role-list"></div>
                         <form id="role-form" class="role-form" hidden>
-                            <input id="role-form-id" type="text" spellcheck="false" placeholder="角色 ID（小写字母 / 数字 / -）">
-                            <input id="role-form-name" type="text" placeholder="显示名称">
-                            <input id="role-form-desc" type="text" placeholder="一句话描述">
-                            <textarea id="role-form-prompt" rows="5" placeholder="系统提示词"></textarea>
+                            <p id="role-form-id-hint" class="settings-hint">ID 由系统分配</p>
+                            <input id="role-form-name" type="text" placeholder="角色名称（例如：财务顾问）">
+                            <input id="role-form-desc" type="text" placeholder="一句话简介（会影响生成效果）">
+                            <div class="role-form-actions">
+                                <button id="role-form-generate" type="button" class="ghost">按名称生成提示词</button>
+                            </div>
+                            <p id="role-form-generate-status" class="settings-status role-generate-status" hidden></p>
+                            <textarea id="role-form-prompt" rows="8" placeholder="系统提示词（可手写，也可点上方按钮生成后修改）"></textarea>
                             <div class="role-form-actions">
                                 <button id="role-form-cancel" type="button" class="ghost">取消</button>
                                 <button type="submit" class="primary">保存角色</button>
@@ -274,46 +380,52 @@
                     </section>
 
                     <section class="settings-tab-panel" data-panel="data">
-                        <div class="settings-row">
-                            <div>
-                                <strong>数据目录</strong>
-                                <span class="settings-hint">会话、记忆、角色与日志都保存在这里。</span>
+                        <div class="settings-block">
+                            <div class="settings-row">
+                                <div>
+                                    <strong>数据目录</strong>
+                                    <span class="settings-hint">会话、记忆、角色与日志都保存在这里；更换后重启生效。</span>
+                                </div>
+                                <div class="role-form-actions">
+                                    <button id="open-data-dir" type="button" class="ghost">打开目录</button>
+                                    <button id="pick-data-dir" type="button" class="ghost">更换目录</button>
+                                </div>
                             </div>
-                            <code id="settings-data-root">-</code>
+                            <p id="settings-data-name" class="settings-hint">当前工作区：-</p>
+                            <div class="settings-row" id="settings-data-pending-row" hidden>
+                                <div>
+                                    <span id="settings-data-pending" class="settings-hint role-tags"></span>
+                                </div>
+                                <div class="role-form-actions">
+                                    <button id="settings-data-save" type="button" class="primary">保存并切换</button>
+                                    <button id="settings-data-cancel" type="button" class="ghost">取消</button>
+                                </div>
+                            </div>
+                            <div class="settings-row" id="settings-data-switched-row" hidden>
+                                <div>
+                                    <span id="settings-data-switched" class="settings-hint role-tags"></span>
+                                </div>
+                                <div class="role-form-actions">
+                                    <button id="settings-data-close" type="button" class="primary">立即关闭</button>
+                                    <button id="settings-data-abort" type="button" class="ghost">撤销切换</button>
+                                </div>
+                            </div>
+                            <p id="settings-data-status" class="settings-status" hidden></p>
                         </div>
-                        <div class="settings-row">
-                            <div>
-                                <strong>日志目录</strong>
-                                <span class="settings-hint">排查问题时可查看 app.log。</span>
-                            </div>
-                            <div class="role-form-actions">
-                                <code id="settings-logs-dir">-</code>
+                        <div class="settings-block">
+                            <div class="settings-row">
+                                <div>
+                                    <strong>日志目录</strong>
+                                    <span class="settings-hint">排查问题时可查看 app.log，日志始终在当前数据目录下。</span>
+                                </div>
                                 <button id="open-logs-dir" type="button" class="ghost">打开目录</button>
                             </div>
+                            <p id="settings-logs-status" class="settings-status" hidden></p>
                         </div>
-                        <div class="settings-row">
-                            <div>
-                                <strong>迁移数据目录</strong>
-                                <span class="settings-hint">把当前数据复制到新目录并逐字节校验，写指针后重启生效；只迁移当前默认目录，不引入 fs/dialog 插件。</span>
-                            </div>
-                            <div class="role-form-actions">
-                                <input id="settings-data-target" type="text" spellcheck="false" placeholder="例如 D:\ai-assistant-data">
-                                <button id="settings-data-migrate" type="button" class="primary">迁移</button>
-                            </div>
-                        </div>
-                        <p id="settings-data-status" class="settings-hint"></p>
                     </section>
 
                     <section class="settings-tab-panel" data-panel="external">
-                        <div class="settings-row">
-                            <div>
-                                <strong>默认对话模型</strong>
-                                <span class="settings-hint">发送消息时优先使用本地模型或某个外部 Provider。</span>
-                            </div>
-                            <select id="settings-default-chat">
-                                <option value="local">本地模型</option>
-                            </select>
-                        </div>
+                        
                         <div class="settings-row">
                             <div>
                                 <strong>云端模式</strong>
@@ -326,21 +438,12 @@
                         </div>
                         <div class="settings-row">
                             <div>
-                                <strong>会话云端预算</strong>
-                                <span class="settings-hint">token 上限，0 表示不限；超额自动降级为仅本地。</span>
+                                <strong>云端调用频次</strong>
+                                <span class="settings-hint">同一会话 1 小时内超过 20 次会弹窗确认；可选择"本次运行不再询问"，重启后恢复。</span>
                             </div>
-                            <input id="settings-cloud-budget" type="number" min="0" step="1000" placeholder="50000">
+                            <span class="settings-hint">按次计数 · 自动阻断</span>
                         </div>
-                        <div class="settings-row">
-                            <div>
-                                <strong>能力档位</strong>
-                                <span class="settings-hint">small = 3B+7B（复杂任务上云）；large = 14B+（本地承担更多）。</span>
-                            </div>
-                            <select id="settings-cloud-profile">
-                                <option value="small">small（3B + 7B）</option>
-                                <option value="large">large（14B+）</option>
-                            </select>
-                        </div>
+                        
                         <div class="settings-provider-head">
                             <div>
                                 <strong>出网记录</strong>
@@ -358,25 +461,39 @@
                         </div>
                         <div id="provider-list" class="provider-list"></div>
                         <form id="provider-form" class="provider-form" hidden>
-                            <div class="provider-grid">
+                            <div class="provider-preset-row">
+                                <label for="provider-form-preset">供应商</label>
                                 <select id="provider-form-preset">
                                     <option value="">选择预设…</option>
                                 </select>
-                                <input id="provider-form-id" type="text" spellcheck="false" placeholder="ID（小写字母 / 数字 / -）">
-                                <input id="provider-form-name" type="text" placeholder="显示名称">
-                                <input id="provider-form-base" type="text" spellcheck="false" placeholder="Base URL">
-                                <input id="provider-form-models" type="text" spellcheck="false" placeholder="模型，逗号分隔，如 deepseek-chat">
-                                <input id="provider-form-default" type="text" spellcheck="false" placeholder="默认模型（留空用第一个）">
-                                <input id="provider-form-key" type="password" placeholder="API Key（留空保持不变）">
                             </div>
-                            <div class="provider-models-tools">
-                                <button id="provider-fetch-models" type="button" class="ghost">自动获取模型</button>
-                                <span id="provider-models-status" class="settings-status"></span>
+                            <div class="provider-key-row">
+                                <input id="provider-form-key" type="password" placeholder="API Key（留空保持不变）">
+                                <button id="provider-test-conn" type="button" class="ghost">测试连接</button>
+                                <button id="provider-fetch-models" type="button" class="ghost">获取模型</button>
+                            </div>
+                            <p id="provider-models-status" class="settings-status"></p>
+                            <div class="provider-model-section">
+                                <div class="provider-model-head">
+                                    <span>模型目录</span>
+                                </div>
+                                <div id="provider-model-rows" class="provider-model-rows"></div>
+                                <input id="provider-form-models" type="hidden" value="">
+                                <button id="provider-add-model" type="button" class="ghost">+ 添加模型</button>
                             </div>
                             <div id="provider-models-picker" class="provider-list" hidden></div>
-                            <label class="provider-check">
-                                <input id="provider-form-enabled" type="checkbox" checked> 启用
-                            </label>
+                            <details class="provider-advanced">
+                                <summary>自定义设置</summary>
+                                <div class="provider-grid">
+                                    <input id="provider-form-id" type="text" spellcheck="false" placeholder="ID（小写字母 / 数字 / -）">
+                                    <input id="provider-form-name" type="text" placeholder="显示名称">
+                                    <input id="provider-form-base" type="text" spellcheck="false" placeholder="Base URL">
+                                    <input id="provider-form-default" type="text" spellcheck="false" placeholder="默认模型（留空用第一个）">
+                                </div>
+                                <label class="provider-check">
+                                    <input id="provider-form-enabled" type="checkbox" checked> 启用
+                                </label>
+                            </details>
                             <div class="role-form-actions">
                                 <button id="provider-form-cancel" type="button" class="ghost">取消</button>
                                 <button type="submit" class="primary">保存 Provider</button>

@@ -42,7 +42,17 @@
     var onboardingStep = 0;
     var onboardingShown = false;
     var pendingImport = null;
+    var providerPresets = [];
+    var lastGenerateError = "";
+    var pendingDataRoot = "";
+    var dataSwitchBusy = false;
+    var restartNoticeTimer = null;
+    var restartNoticeRemaining = 0;
+    var restartFallbackActive = false;
+    var switchedTarget = "";
+    var switchedFiles = 0;
     var localModels = [];
+    var modelOptions = [];
     var editingRoleId = null;
     var providers = [];
     var providerPickerContext = null;
@@ -73,7 +83,11 @@
             emptyHint: item.desc || "发一条消息试试。",
             systemPrompt: item.systemPrompt || "",
             modelPreference: item.modelPreference || "heavy",
-            builtin: Boolean(item.builtin)
+            builtin: Boolean(item.builtin),
+            memoryScope: item.memoryScope || "full",
+            cloudPolicy: item.cloudPolicy,
+            cloudPolicyResolved: item.cloudPolicyResolved || "",
+            disclaimer: item.disclaimer || ""
         };
     }
 
@@ -108,8 +122,18 @@
         }
     }
 
-    function roleName(id) {
-        var role = roleById(id);
+    /// 取路径最后一段（用于只显示目录名，不铺长路径）
+    function baseName(path) {
+        if (!path) {
+            return "";
+        }
+        var parts = String(path).split(/[\\/]+/).filter(function (item) {
+            return item;
+        });
+        return parts.length ? parts[parts.length - 1] : String(path);
+    }
+
+    function roleName(id) {        var role = roleById(id);
         return role ? role.name : id;
     }
 
@@ -784,10 +808,6 @@
         if (!settings || !settings.cloud) {
             return;
         }
-        if (els.settingsCloudBudget) {
-            var budget = settings.cloud.budgetTokens;
-            els.settingsCloudBudget.value = String(budget == null ? 50000 : budget);
-        }
         if (els.settingsCloudProfile) {
             els.settingsCloudProfile.value = settings.cloud.profile || "small";
         }
@@ -834,49 +854,303 @@
     }
 
     // ---- 5A：数据目录迁移 ----
-    async function migrateDataRoot() {
+    /// 选择新的数据目录（系统原生的文件夹选择框）
+    async function pickDataDir() {
         if (!invokeFn) {
-            toast("浏览器预览：无法迁移");
+            toast("浏览器预览：无法选择目录");
             return;
-        }
-        var target = els.settingsDataTarget ? els.settingsDataTarget.value.trim() : "";
-        if (!target) {
-            toast("请填写目标目录");
-            return;
-        }
-        var confirmed = window.confirm(
-            "将把当前数据复制到：\n" + target + "\n\n" +
-            "· 目标目录已存在的同名文件会被覆盖；\n" +
-            "· 复制后会逐字节校验，校验不通过则不写指针；\n" +
-            "· 迁移完成后需要重启应用才生效。\n\n继续吗？");
-        if (!confirmed) {
-            return;
-        }
-        els.settingsDataMigrate.disabled = true;
-        if (els.settingsDataStatus) {
-            els.settingsDataStatus.textContent = "迁移中…";
         }
         try {
-            var report = await invokeFn("set_data_root", { path: target });
-            var sizeKb = Math.round((report.bytes || 0) / 1024);
-            var text = "已复制 " + report.files + " 个文件（" + sizeKb + " KB）";
-            if (report.skipped) {
-                text += "，跳过 " + report.skipped + " 个被占用文件";
+            var picked = await invokeFn("pick_data_dir");
+            if (!picked) {
+                return;
             }
-            text += report.verified ? "，校验通过；请重启应用生效" : "，校验未通过";
-            if (els.settingsDataStatus) {
-                els.settingsDataStatus.textContent = text;
-            }
-            toast("迁移完成，重启应用后生效");
+            pendingDataRoot = picked;
+            renderPendingDataRoot();
         } catch (err) {
-            var message = err && err.message ? err.message : String(err);
-            if (els.settingsDataStatus) {
-                els.settingsDataStatus.textContent = "迁移失败：" + message;
-            }
-            toast("迁移失败：" + message);
-        } finally {
-            els.settingsDataMigrate.disabled = false;
+            toast("选择目录失败：" + (err && err.message ? err.message : String(err)));
         }
+    }
+
+    function renderPendingDataRoot() {
+        if (els.settingsDataPendingRow) {
+            els.settingsDataPendingRow.hidden = !pendingDataRoot;
+        }
+        if (els.settingsDataPending) {
+            els.settingsDataPending.textContent = pendingDataRoot
+                ? "待切换到：" + pendingDataRoot + "（尚未生效）"
+                : "";
+            els.settingsDataPending.title = pendingDataRoot || "";
+        }
+    }
+
+    function cancelPendingDataRoot() {
+        if (dataSwitchBusy) {
+            toast("正在切换数据目录，请稍候");
+            return;
+        }
+        pendingDataRoot = "";
+        renderPendingDataRoot();
+        setDataStatus("");
+    }
+
+    /// 保存并切换到新数据目录：先问是否迁移，再二次确认
+    async function saveDataRoot() {
+        if (!invokeFn) {
+            toast("浏览器预览：无法切换目录");
+            return;
+        }
+        if (dataSwitchBusy) {
+            toast("正在切换数据目录，请稍候");
+            return;
+        }
+        if (!pendingDataRoot) {
+            return;
+        }
+        var migrate = window.confirm(
+            "切换到：\n" + pendingDataRoot + "\n\n" +
+            "是否把现有数据迁移过去？\n\n" +
+            "· 确定 = 迁移（重启后清空旧目录内容，保留文件夹）\n" +
+            "· 取消 = 不迁移（新目录从空白开始，旧目录不动）");
+        var note = migrate
+            ? "迁移成功后，重启应用时会清空旧目录内容（文件夹保留）。"
+            : "新目录将从空白开始，旧目录保持不变。";
+        if (!window.confirm("确认切换？\n\n" + note + "\n\n切换后需要重启应用才生效。")) {
+            return;
+        }
+        dataSwitchBusy = true;
+        if (els.settingsDataSave) {
+            els.settingsDataSave.textContent = "切换中…";
+        }
+        setDataStatus(migrate ? "迁移中…" : "切换中…", "");
+        try {
+            var report = await invokeFn(migrate ? "migrate_data_root" : "set_data_root", {
+                path: pendingDataRoot
+            });
+            var sizeKb = Math.round((report.bytes || 0) / 1024);
+            var text = migrate
+                ? "已复制 " + report.files + " 个文件（" + sizeKb + " KB）到新目录"
+                : "已切换到新目录";
+            text += "。关闭应用后重新打开即可生效。";
+            setDataStatus(text, "ok");
+            var target = pendingDataRoot;
+            uiLog("switch done files=" + report.files + " bytes=" + (report.bytes || 0) + " target=" + target);
+            if (els.settingsDataName) {
+                els.settingsDataName.textContent =
+                    "当前工作区：" + baseName(target) + "（关闭后生效）";
+                els.settingsDataName.title = target;
+            }
+            pendingDataRoot = "";
+            renderPendingDataRoot();
+            switchedTarget = target;
+            switchedFiles = report.files;
+            try {
+                showRestartNotice();
+            } catch (noticeErr) {
+                uiLog("showRestartNotice failed: " + noticeErr);
+            }
+        } catch (err) {
+            setDataStatus("切换失败：" + (err && err.message ? err.message : String(err)), "error");
+        } finally {
+            dataSwitchBusy = false;
+            if (els.settingsDataSave) {
+                els.settingsDataSave.textContent = "保存并切换";
+            }
+        }
+    }
+
+    /// 前端诊断日志（写进 app.log，沙箱里也能查）
+    function uiLog(message) {
+        try {
+            if (invokeFn) {
+                invokeFn("ui_log", { message: String(message) });
+            }
+        } catch (err) {
+            /* 诊断日志失败不影响主流程 */
+        }
+    }
+
+    /// 行内兜底行（仅在弹窗不可见时启用）
+    function renderSwitchedRow(target, text) {
+        var row = document.getElementById("settings-data-switched-row");
+        var label = document.getElementById("settings-data-switched");
+        if (!row) {
+            return;
+        }
+        if (!target) {
+            row.hidden = true;
+            restartFallbackActive = false;
+            return;
+        }
+        row.hidden = false;
+        if (label) {
+            label.textContent = text || "";
+            label.title = target;
+        }
+    }
+
+    function switchedText() {
+        if (!switchedTarget) {
+            return "";
+        }
+        var suffix = restartNoticeRemaining > 0
+            ? "· " + restartNoticeRemaining + " 秒后自动关闭"
+            : "· 正在关闭…";
+        return "已切换到：" + switchedTarget + "（已复制 " + switchedFiles +
+            " 个文件）" + suffix;
+    }
+
+    /// 浮层元素用 getElementById 直接取，避免 els 漏赋值时静默失效
+    function restartNoticeDom() {
+        return {
+            box: document.getElementById("restart-notice"),
+            text: document.getElementById("restart-notice-text"),
+            close: document.getElementById("restart-now"),
+            abort: document.getElementById("restart-abort")
+        };
+    }
+
+    /// 复制完成后：5 秒倒计时自动关闭，也可立即关闭或撤销切换
+    function showRestartNotice() {
+        var dom = restartNoticeDom();
+        restartFallbackActive = false;
+        renderSwitchedRow(null);
+        if (!dom.box) {
+            uiLog("restart notice missing element, fallback to inline row");
+            restartFallbackActive = true;
+            renderSwitchedRow(switchedTarget, switchedText());
+            startRestartCountdown();
+            return;
+        }
+        restartNoticeRemaining = 5;
+        dom.box.hidden = false;
+        uiLog("restart notice: box=" + Boolean(dom.box) + " text=" + Boolean(dom.text));
+        if (dom.close) {
+            dom.close.disabled = false;
+            dom.close.textContent = "立即关闭";
+        }
+        renderRestartNotice();
+        startRestartCountdown();
+
+        // 客观自检：弹窗虽然显示，但可能被更高层级的面板盖住
+        window.setTimeout(function () {
+            if (restartFallbackActive) {
+                return;
+            }
+            var box = restartNoticeDom().box;
+            if (!box || box.hidden) {
+                return;
+            }
+            var rect = box.getBoundingClientRect();
+            var hit = rect.width > 10 && rect.height > 10
+                ? document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+                : null;
+            var visible = Boolean(hit && box.contains(hit));
+            uiLog("restart notice visible=" + visible);
+            if (!visible) {
+                restartFallbackActive = true;
+                renderSwitchedRow(switchedTarget, switchedText());
+            }
+        }, 80);
+    }
+
+    function startRestartCountdown() {
+        window.clearInterval(restartNoticeTimer);
+        restartNoticeTimer = window.setInterval(function () {
+            restartNoticeRemaining -= 1;
+            if (restartNoticeRemaining <= 0) {
+                window.clearInterval(restartNoticeTimer);
+                restartNoticeTimer = null;
+                doCloseApp();
+                return;
+            }
+            renderRestartNotice();
+        }, 1000);
+    }
+
+    function renderRestartNotice() {
+        var dom = restartNoticeDom();
+        var draft = els.input && els.input.value.trim().length > 0;
+        if (draft) {
+            window.clearInterval(restartNoticeTimer);
+            restartNoticeTimer = null;
+        }
+        if (restartFallbackActive) {
+            renderSwitchedRow(
+                switchedTarget,
+                draft
+                    ? "已切换到：" + switchedTarget + "（已复制 " + switchedFiles +
+                      " 个文件）· 检测到未发送内容，已暂停自动关闭"
+                    : switchedText());
+        }
+        if (!dom.text) {
+            return;
+        }
+        if (draft) {
+            dom.text.textContent =
+                "数据已复制到新目录。检测到输入框里还有未发送的内容，已暂停自动关闭，请先处理或点「立即关闭」。";
+            return;
+        }
+        dom.text.textContent =
+            "数据已复制到新目录。应用将在 " + restartNoticeRemaining +
+            " 秒后自动关闭，请重新打开以生效。";
+    }
+
+    function hideRestartNotice() {
+        window.clearInterval(restartNoticeTimer);
+        restartNoticeTimer = null;
+        restartFallbackActive = false;
+        renderSwitchedRow(null);
+        var dom = restartNoticeDom();
+        if (dom.box) {
+            dom.box.hidden = true;
+        }
+    }
+
+    async function doCloseApp() {
+        window.clearInterval(restartNoticeTimer);
+        restartNoticeTimer = null;
+        if (!invokeFn) {
+            return;
+        }
+        try {
+            await invokeFn("close_app");
+        } catch (err) {
+            var dom = restartNoticeDom();
+            if (dom.text) {
+                dom.text.textContent =
+                    "关闭失败：" + (err && err.message ? err.message : String(err)) +
+                    "。请手动关闭应用后重新打开，或点「撤销切换」继续使用原目录。";
+            }
+            if (dom.close) {
+                dom.close.disabled = true;
+            }
+        }
+    }
+
+    async function abortDataSwitch() {
+        hideRestartNotice();
+        renderSwitchedRow(null);
+        switchedTarget = "";
+        switchedFiles = 0;
+        if (!invokeFn) {
+            return;
+        }
+        try {
+            var root = await invokeFn("abort_data_switch");
+            setDataStatus("已撤销切换，仍使用：" + root, "ok");
+            if (els.settingsDataName) {
+                els.settingsDataName.textContent = "当前工作区：" + baseName(root);
+                els.settingsDataName.title = root;
+            }
+        } catch (err) {
+            setDataStatus("撤销失败：" + (err && err.message ? err.message : String(err)), "error");
+        }
+    }
+
+    /// 数据目录状态提示：kind = "ok" | "error" | 省略（进行中）
+    function setDataStatus(text, kind) {
+        setStatusLine(els.settingsDataStatus, text, kind);
     }
 
     // ---- 5B：首次启动引导（3 步） ----
@@ -984,18 +1258,81 @@
     }
 
     // ---- 模型扫描与导入 ----
-    async function openLocalPath(kind) {
+    /// 云端频次闸门：返回 continue / local / cancel
+    var cloudGateResolve = null;
+
+    async function cloudGate(sessionId) {
         if (!invokeFn) {
+            return "continue";
+        }
+        var usage = null;
+        try {
+            usage = await invokeFn("cloud_usage", { sessionId: sessionId });
+        } catch (err) {
+            return "continue";
+        }
+        if (!usage || !usage.blocked || usage.suppressed) {
+            return "continue";
+        }
+        var box = document.getElementById("cloud-gate");
+        var text = document.getElementById("cloud-gate-text");
+        if (!box || !text) {
+            return "continue";
+        }
+        text.textContent = "本会话 " + usage.windowMinutes + " 分钟内已调用云端 " +
+            usage.used + " 次（上限 " + usage.limit + "）。继续会产生费用，内容将发送到云端。";
+        box.hidden = false;
+        var choice = await new Promise(function (resolve) {
+            cloudGateResolve = function (value) {
+                box.hidden = true;
+                cloudGateResolve = null;
+                resolve(value);
+            };
+        });
+        uiLog("cloud gate choice=" + choice);
+        if (choice === "never") {
+            try {
+                await invokeFn("set_cloud_prompt_suppressed", { value: true });
+            } catch (err) {
+                /* 忽略 */
+            }
+            return "continue";
+        }
+        return choice;
+    }
+
+    /// 打开本地目录；传入 statusEl 时把结果写在行内，否则用 toast
+    async function openLocalPath(kind, statusEl) {
+        var show = function (text, kind2) {
+            if (statusEl) {
+                setStatusLine(statusEl, text, kind2);
+            } else if (text) {
+                toast(text);
+            }
+        };
+        if (!invokeFn) {
+            show("浏览器预览：无法打开目录", "error");
             return;
         }
         try {
             var path = await invokeFn("open_local_path", { kind: kind });
             if (path) {
-                toast("已打开：" + path);
+                show("已打开：" + path, "ok");
             }
         } catch (err) {
-            toast("打开目录失败：" + (err && err.message ? err.message : String(err)));
+            show("打开目录失败：" + (err && err.message ? err.message : String(err)), "error");
         }
+    }
+
+    /// 通用行内状态提示：kind = "ok" | "error" | 省略
+    function setStatusLine(el, text, kind) {
+        if (!el) {
+            return;
+        }
+        el.textContent = text || "";
+        el.hidden = !text;
+        el.classList.toggle("is-error", kind === "error");
+        el.classList.toggle("is-ok", kind === "ok");
     }
 
     async function scanModels() {
@@ -1135,6 +1472,77 @@
             toast("导入失败：" + message);
         } finally {
             els.modelImportSubmit.disabled = false;
+        }
+    }
+
+    /// 复制到剪贴板：优先 Clipboard API，失败回退 execCommand
+    async function copyText(text) {
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (err) {
+            /* 回退到 execCommand */
+        }
+        try {
+            var area = document.createElement("textarea");
+            area.value = text;
+            area.style.position = "fixed";
+            area.style.opacity = "0";
+            document.body.appendChild(area);
+            area.select();
+            var ok = document.execCommand("copy");
+            document.body.removeChild(area);
+            return ok;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    /// 本地优先角色（健康/心理）在本地回答后，提供一次"用云端再分析"的显式放权
+    async function maybeOfferCloudForRole(roleId, sessionId, text, reply) {
+        var role = roleById(roleId);
+        if (!role || role.cloudPolicyResolved !== "localFirst") {
+            return;
+        }
+        if (!reply || !reply.route || !reply.route.needsCloudConsent) {
+            return;
+        }
+        var providerId = (settings && settings.defaultChat) || "local";
+        if (providerId === "local") {
+            return; // 未配置外部 Provider：不打扰用户
+        }
+        var provider = providerById(providerId);
+        if (!provider || !provider.enabled) {
+            return;
+        }
+        var confirmed = window.confirm(
+            "「" + role.name + "」当前用本地模型回答，准确度有限。\n\n" +
+            "是否改用云端模型再分析一次？\n" +
+            "内容将发送到「" + providerName(providerId) + "」。");
+        if (!confirmed) {
+            return;
+        }
+        var typing = showTyping();
+        try {
+            var context = {
+                role: roleId,
+                message: text,
+                sessionId: sessionId,
+                providerId: providerId,
+                includeContext: false
+            };
+            var cloudReply = await executeExternal(context, typing);
+            if (cloudReply) {
+                typing.remove();
+                applyExternalReply(context, cloudReply);
+                await loadSessions(roleId);
+                updateStatus();
+            }
+        } catch (err) {
+            typing.remove();
+            toast("云端分析失败：" + (err && err.message ? err.message : String(err)));
         }
     }
 
@@ -1298,6 +1706,8 @@
         return wrapper;
     }
 
+    var ROLE_ITEM_HEIGHT = 40;
+
     function renderRoleWheel() {
         if (!els.roleWheelList) {
             return;
@@ -1314,22 +1724,37 @@
             var name = document.createElement("span");
             name.className = "role-wheel-name";
             name.textContent = role.name;
-
-            var desc = document.createElement("span");
-            desc.className = "role-wheel-desc";
-            desc.textContent = role.desc;
-
             item.appendChild(name);
-            item.appendChild(desc);
+
+            if (role.id === currentRole) {
+                var tick = document.createElement("span");
+                tick.className = "role-wheel-check";
+                tick.textContent = "✓";
+                item.appendChild(tick);
+            }
+
             item.addEventListener("click", function () {
                 switchRole(role.id);
                 closeRoleWheel();
             });
             els.roleWheelList.appendChild(item);
         });
+        layoutRoleWheel();
         if (roleWheelOpen) {
             centerRoleWheel(false);
         }
+    }
+
+    /// 轮盘高度自适应：角色少时不留空，多时最多 240px 并滚动
+    function layoutRoleWheel() {
+        if (!els.roleWheelList) {
+            return;
+        }
+        var count = Math.max(roles.length, 1);
+        var view = Math.min(240, count * ROLE_ITEM_HEIGHT);
+        els.roleWheelList.style.maxHeight = view + "px";
+        els.roleWheelList.style.paddingTop = "0";
+        els.roleWheelList.style.paddingBottom = "0";
     }
 
     function centerRoleWheel(smooth) {
@@ -1338,7 +1763,7 @@
         }
         roleWheelSuppress = true;
         els.roleWheelList.scrollTo({
-            top: roleIndex() * 48,
+            top: roleIndex() * ROLE_ITEM_HEIGHT,
             behavior: smooth ? "smooth" : "auto"
         });
         window.setTimeout(function () {
@@ -1374,17 +1799,13 @@
     }
 
     function onRoleWheelScroll() {
-        if (!roleWheelOpen || roleWheelSuppress) {
+        // 滚动只负责浏览，不切换角色；避免聊天记录在悬停/滚动时闪动
+        // 切换动作统一交由点击（或键盘方向键）确认
+        if (!roleWheelOpen) {
             return;
         }
         window.clearTimeout(roleWheelTimer);
-        roleWheelTimer = window.setTimeout(function () {
-            var index = Math.round(els.roleWheelList.scrollTop / 48);
-            index = Math.max(0, Math.min(roles.length - 1, index));
-            if (roles[index] && roles[index].id !== currentRole) {
-                switchRole(roles[index].id);
-            }
-        }, 140);
+        roleWheelTimer = null;
     }
 
     function onRoleWheelKeydown(event) {
@@ -1551,6 +1972,7 @@
                     currentSessionByRole[roleAtSend] = sessionId;
                 }
                 noteRouteUsage(reply.route);
+                await maybeOfferCloudForRole(roleAtSend, sessionId, text, reply);
             } else {
                 await sleep(350);
                 content = mockReply(roleAtSend, text);
@@ -1657,22 +2079,46 @@
         }
     }
 
-    function fillModelSelect(select, selected) {
+    function fillModelSelect(select, selected, preferredGrade) {
         if (!select) {
             return;
         }
         select.innerHTML = "";
-        var values = localModels.slice();
-        if (selected && values.indexOf(selected) === -1) {
-            values.unshift(selected);
+        // 只列已登记（models.json）的对话模型；embedding 与未登记模型一律隐藏
+        var chat = modelOptions.filter(function (item) {
+            return item.kind !== "embedding" && item.registered;
+        });
+        if (preferredGrade) {
+            var preferred = chat.filter(function (item) {
+                return item.grade === preferredGrade;
+            });
+            var others = chat.filter(function (item) {
+                return item.grade !== preferredGrade;
+            });
+            chat = preferred.concat(others);
         }
-        if (!values.length && selected) {
-            values = [selected];
+        var names = chat.map(function (item) {
+            return item.name;
+        });
+        if (selected && names.indexOf(selected) === -1) {
+            names.unshift(selected);
         }
-        values.forEach(function (model) {
+        if (!names.length && selected) {
+            names = [selected];
+        }
+        names.forEach(function (model) {
+            var matched = chat.filter(function (item) {
+                return item.name === model;
+            })[0];
             var option = document.createElement("option");
             option.value = model;
-            option.textContent = model;
+            var hint = "";
+            if (matched && matched.grade && matched.grade !== "unknown") {
+                hint = " · " + matched.grade;
+            } else if (!matched) {
+                hint = " · 未安装";
+            }
+            option.textContent = model + hint;
             select.appendChild(option);
         });
         if (selected) {
@@ -1680,9 +2126,38 @@
         }
     }
 
+    function customRoleStats() {
+        var customs = roles.filter(function (role) {
+            return !role.builtin;
+        });
+        var used = {};
+        customs.forEach(function (role) {
+            var number = parseInt(String(role.id).replace("custom-", ""), 10);
+            if (!isNaN(number)) {
+                used[number] = true;
+            }
+        });
+        var nextId = null;
+        for (var n = 5; n <= 8; n += 1) {
+            if (!used[n]) {
+                nextId = "custom-" + n;
+                break;
+            }
+        }
+        return { count: customs.length, max: 4, nextId: nextId };
+    }
+
     function renderSettingsRoles() {
         if (!els.settingsRoleList) {
             return;
+        }
+        var stats = customRoleStats();
+        if (els.roleAddBtn) {
+            var full = stats.count >= stats.max;
+            els.roleAddBtn.disabled = full;
+            els.roleAddBtn.textContent = full
+                ? "+ 已达上限（4/4）"
+                : "+ 新建角色（" + stats.count + "/4）";
         }
         els.settingsRoleList.innerHTML = "";
         roles.forEach(function (role) {
@@ -1697,6 +2172,25 @@
             desc.textContent = role.desc || role.id;
             info.appendChild(name);
             info.appendChild(desc);
+
+            var tagParts = [];
+            if (role.cloudPolicyResolved === "localFirst") {
+                tagParts.push("本地优先 · 可放权云端");
+            } else if (role.cloudPolicyResolved === "localOnly") {
+                tagParts.push("仅本地");
+            }
+            if (role.memoryScope === "explicitOnly") {
+                tagParts.push("不默认记忆");
+            }
+            if (role.cloudPolicyResolved === "localFirst" || role.cloudPolicyResolved === "localOnly") {
+                tagParts.push("本地准确度有限");
+            }
+            if (tagParts.length) {
+                var tags = document.createElement("span");
+                tags.className = "settings-hint role-tags";
+                tags.textContent = tagParts.join(" · ");
+                info.appendChild(tags);
+            }
 
             var actions = document.createElement("div");
             actions.className = "settings-role-actions";
@@ -1740,11 +2234,15 @@
         var models = s.models || {};
         els.settingsThemeSelect.value = s.theme || "system";
         els.settingsOllamaHost.value = models.ollamaHost || "";
-        els.settingsModelsDir.textContent = models.modelsDir || "-";
-        els.settingsDataRoot.textContent = settingsView && settingsView.dataRoot ? settingsView.dataRoot : "-";
-        els.settingsLogsDir.textContent = settingsView && settingsView.logsDir ? settingsView.logsDir : "-";
-        fillModelSelect(els.settingsRouter, models.router || "");
-        fillModelSelect(els.settingsCoordinator, models.coordinator || "");
+        var dataRoot = settingsView && settingsView.dataRoot ? settingsView.dataRoot : "";
+        if (els.settingsDataName) {
+            els.settingsDataName.textContent = dataRoot
+                ? "当前工作区：" + baseName(dataRoot)
+                : "当前工作区：-";
+            els.settingsDataName.title = dataRoot;
+        }
+        fillModelSelect(els.settingsRouter, models.router || "", "");
+        fillModelSelect(els.settingsCoordinator, models.coordinator || "", "");
         renderSettingsRoles();
         applyTheme(s.theme || "system");
     }
@@ -1754,10 +2252,17 @@
             return;
         }
         try {
-            var list = await invokeFn("list_local_models");
-            localModels = Array.isArray(list) ? list : [];
+            var options = await invokeFn("model_options");
+            modelOptions = Array.isArray(options) ? options : [];
         } catch (err) {
-            localModels = [];
+            modelOptions = [];
+        }
+        // 兼容旧逻辑：仍保留纯名字列表
+        localModels = modelOptions.map(function (item) {
+            return item.name;
+        });
+        if (settings) {
+            renderSettings();
         }
     }
 
@@ -1811,14 +2316,32 @@
         if (!els.roleForm) {
             return;
         }
+        var stats = customRoleStats();
         editingRoleId = role ? role.id : null;
         els.roleForm.hidden = false;
-        els.roleFormId.value = role ? role.id : "";
-        els.roleFormId.disabled = Boolean(role);
+        if (els.roleFormIdHint) {
+            els.roleFormIdHint.textContent = role
+                ? "ID：" + role.id + "（不可修改）"
+                : (stats.nextId
+                    ? "ID：" + stats.nextId + "（系统分配）"
+                    : "自建角色已满 4/4，请先删除一个再新建");
+        }
         els.roleFormName.value = role ? role.name : "";
         els.roleFormDesc.value = role ? role.desc : "";
         els.roleFormPrompt.value = role ? (role.systemPrompt || "") : "";
+        lastGenerateError = "";
+        setGenerateStatus("");
         els.roleFormName.focus();
+    }
+
+    /// 生成状态行（独立一行，不挤压按钮）
+    function setGenerateStatus(text, copyable) {
+        if (!els.roleFormGenerateStatus) {
+            return;
+        }
+        els.roleFormGenerateStatus.textContent = text || "";
+        els.roleFormGenerateStatus.hidden = !text;
+        els.roleFormGenerateStatus.classList.toggle("copyable", Boolean(copyable && text));
     }
 
     function closeRoleForm() {
@@ -1828,7 +2351,40 @@
         editingRoleId = null;
         els.roleForm.hidden = true;
         els.roleForm.reset();
-        els.roleFormId.disabled = false;
+        lastGenerateError = "";
+        setGenerateStatus("");
+    }
+
+    /// 按角色名生成专业提示词（本地 7B，失败不覆盖已填内容）
+    async function generateRolePrompt() {
+        if (!invokeFn) {
+            return;
+        }
+        var name = els.roleFormName.value.trim();
+        if (!name) {
+            setSettingsStatus("请先填写角色名称");
+            return;
+        }
+        els.roleFormGenerate.disabled = true;
+        setGenerateStatus("生成中（本地模型，约几秒）…", false);
+        try {
+            var result = await invokeFn("generate_role_prompt", {
+                name: name,
+                desc: els.roleFormDesc.value.trim() || null
+            });
+            els.roleFormPrompt.value = result.systemPrompt || "";
+            var guardCount = result.guardrails ? result.guardrails.length : 0;
+            setGenerateStatus(
+                guardCount
+                    ? "已生成（含 " + guardCount + " 条护栏），可直接修改"
+                    : "已生成，可直接修改",
+                false);
+        } catch (err) {
+            lastGenerateError = err && err.message ? err.message : String(err);
+            setGenerateStatus("生成失败：" + lastGenerateError + "（点击复制）", true);
+        } finally {
+            els.roleFormGenerate.disabled = false;
+        }
     }
 
     async function submitRoleForm(event) {
@@ -1838,7 +2394,7 @@
             return;
         }
         var role = {
-            id: editingRoleId || els.roleFormId.value.trim(),
+            id: editingRoleId || "",
             name: els.roleFormName.value.trim(),
             desc: els.roleFormDesc.value.trim(),
             systemPrompt: els.roleFormPrompt.value.trim(),
@@ -1846,30 +2402,34 @@
             builtin: false,
             enabled: true
         };
-        if (!role.id || !role.name || !role.systemPrompt) {
-            setSettingsStatus("角色 ID、名称和系统提示词不能为空");
+        if (!role.name || !role.systemPrompt) {
+            setSettingsStatus("角色名称和系统提示词不能为空");
             return;
         }
         try {
-            await invokeFn("save_role", { role: role });
+            var saved = await invokeFn("save_role", { role: role });
             await loadRoles();
             renderSettingsRoles();
             closeRoleForm();
-            setSettingsStatus("角色已保存");
+            setSettingsStatus("角色已保存（ID：" + ((saved && saved.id) || "-") + "）");
         } catch (err) {
             setSettingsStatus("保存角色失败：" + (err && err.message ? err.message : String(err)));
         }
     }
 
     async function removeRole(role) {
-        if (!window.confirm("删除角色「" + role.name + "」？对话数据会归档到 memory/_deleted。")) {
+        var confirmed = window.confirm(
+            "删除角色「" + role.name + "」？\n\n" +
+            "· 该角色的会话、长期记忆、知识库与上下文缓存会被**彻底删除**，无法恢复；\n" +
+            "· 释放出来的 ID 会被后续新建角色复用。\n\n确定删除吗？");
+        if (!confirmed) {
             return;
         }
         if (!invokeFn) {
             return;
         }
         try {
-            await invokeFn("delete_role", { roleId: role.id, deleteData: false });
+            await invokeFn("delete_role", { roleId: role.id });
             await loadRoles();
             renderSettingsRoles();
             await loadSessions(currentRole);
@@ -1897,8 +2457,6 @@
         next.cloud = next.cloud || {};
         next.cloud.mode = els.settingsCloudMode ? els.settingsCloudMode.value : "localFirst";
         next.cloud.enabled = next.cloud.mode === "cloudOnly";
-        var budget = els.settingsCloudBudget ? parseInt(els.settingsCloudBudget.value, 10) : NaN;
-        next.cloud.budgetTokens = isNaN(budget) || budget < 0 ? 0 : budget;
         next.cloud.profile = els.settingsCloudProfile ? els.settingsCloudProfile.value : "small";
         els.settingsSave.disabled = true;
         setSettingsStatus("保存中…");
@@ -2006,22 +2564,31 @@
         if (!els.settingsDefaultChat) {
             return;
         }
-        var current = els.settingsDefaultChat.value || (settings && settings.defaultChat) || "local";
+        var current = els.settingsDefaultChat.value ||
+            (settings && settings.defaultChat) || "local";
         els.settingsDefaultChat.innerHTML = "";
         var local = document.createElement("option");
         local.value = "local";
         local.textContent = "本地模型";
         els.settingsDefaultChat.appendChild(local);
-        providers.forEach(function (provider) {
-            if (!provider.enabled) {
+
+        // 两层结构：默认模型指向「供应商 : 模型」
+        var catalog = (settings && settings.externalModels) || [];
+        catalog.forEach(function (item) {
+            var provider = providerById(item.providerId);
+            if (!provider || !provider.enabled) {
                 return;
             }
             var option = document.createElement("option");
-            option.value = provider.id;
-            option.textContent = provider.name;
+            option.value = item.id;
+            option.textContent = provider.name + " · " + (item.displayName || item.modelId);
             els.settingsDefaultChat.appendChild(option);
         });
-        if (current !== "local" && !providerById(current)) {
+
+        var exists = catalog.some(function (item) {
+            return item.id === current;
+        });
+        if (current !== "local" && !exists) {
             current = "local";
         }
         els.settingsDefaultChat.value = current;
@@ -2046,7 +2613,29 @@
             var info = document.createElement("div");
             info.className = "provider-info";
             var name = document.createElement("strong");
-            name.textContent = provider.name + (provider.enabled ? "" : " · 已停用");
+            var cleanName = String(provider.name || "").replace(/ · (海外|未实测|国内|推荐)/g, "");
+            name.textContent = cleanName + (provider.enabled ? "" : " · 已停用");
+            var presetInfo = null;
+            for (var pi = 0; pi < (providerPresets || []).length; pi += 1) {
+                var candidateBase = (providerPresets[pi].baseUrl || "").replace(/\/+$/, "");
+                if (candidateBase && candidateBase === (provider.baseUrl || "").replace(/\/+$/, "")) {
+                    presetInfo = providerPresets[pi];
+                    break;
+                }
+            }
+            var verifiedIds = (settings && settings.verifiedProviders) || [];
+            if (presetInfo && presetInfo.region === "global") {
+                var regionTag = document.createElement("span");
+                regionTag.className = "provider-tag";
+                regionTag.textContent = "海外";
+                info.appendChild(regionTag);
+            }
+            if (presetInfo && presetInfo.unverified && verifiedIds.indexOf(provider.id) === -1) {
+                var unverifiedTag = document.createElement("span");
+                unverifiedTag.className = "provider-tag";
+                unverifiedTag.textContent = "未实测";
+                info.appendChild(unverifiedTag);
+            }
             var detail = document.createElement("span");
             detail.textContent = provider.baseUrl + " · " + provider.defaultModel +
                 " · " + (provider.hasApiKey ? "已配置 Key" : "未配置 Key");
@@ -2088,6 +2677,17 @@
             });
 
             actions.appendChild(test);
+            // 已存密钥时提供单独清除入口（保留 Provider 配置）
+            if (provider.hasApiKey) {
+                var clearKey = document.createElement("button");
+                clearKey.type = "button";
+                clearKey.className = "ghost";
+                clearKey.textContent = "清除密钥";
+                clearKey.addEventListener("click", function () {
+                    clearProviderKey(provider);
+                });
+                actions.appendChild(clearKey);
+            }
             actions.appendChild(edit);
             actions.appendChild(remove);
             item.appendChild(info);
@@ -2174,6 +2774,16 @@
         }
         try {
             var presets = await invokeFn("provider_presets");
+            try {
+                var fileVersion = await invokeFn("presets_version");
+                var appliedVersion = (settings && settings.presetVersion) || 0;
+                if (fileVersion && fileVersion > appliedVersion) {
+                    setSettingsStatus("供应商预设已更新（v" + fileVersion + "），可在下拉里查看新供应商");
+                }
+            } catch (err) {
+                /* 版本提示失败不影响预设加载 */
+            }
+            providerPresets = presets || [];
             var select = els.providerFormPreset;
             select.textContent = "";
             var placeholder = document.createElement("option");
@@ -2185,11 +2795,16 @@
                 if (!group) {
                     group = document.createElement("optgroup");
                     group.dataset.group = preset.group;
-                    group.label = preset.group === "official" ? "官方直连" : "聚合代理";
+                    group.label = preset.group === "official"
+                    ? "直连（官方）"
+                    : preset.group === "custom"
+                        ? "自定义"
+                        : "中间代理";
                     select.appendChild(group);
                 }
                 var option = document.createElement("option");
                 option.value = preset.id;
+
                 option.textContent = preset.name;
                 option.dataset.baseUrl = preset.baseUrl || "";
                 option.dataset.note = preset.note || "";
@@ -2212,11 +2827,37 @@
         if (option.dataset.baseUrl) {
             els.providerFormBase.value = option.dataset.baseUrl;
         }
+        // 预设自带模型清单：直接填好，避免手打模型名写错
+        var preset = null;
+        for (var i = 0; i < providerPresets.length; i += 1) {
+            if (providerPresets[i].id === option.value) {
+                preset = providerPresets[i];
+                break;
+            }
+        }
+        if (preset) {
+            // 模型清单一律靠「连接」实时拉取，预设里不写死
+            els.providerFormModels.value = "";
+            els.providerFormDefault.value = "";
+            providerDisplayNames = {};
+            renderProviderModelRows();
+            setProviderStatus("", "");
+            var endpoints = preset.endpoints || [];
+            if (endpoints.length && endpoints[0].baseUrl) {
+                els.providerFormBase.value = endpoints[0].baseUrl;
+            }
+            if (els.providerModelsStatus) {
+                var extra = endpoints.length > 1
+                    ? "；可选端点：" + endpoints.map(function (item) { return item.label; }).join(" / ")
+                    : "";
+                els.providerModelsStatus.textContent = (preset.note || "") + extra;
+            }
+        }
         if (!els.providerFormId.value.trim() && option.value !== "custom") {
             els.providerFormId.value = option.value;
         }
         if (!els.providerFormName.value.trim()) {
-            els.providerFormName.value = option.textContent;
+            els.providerFormName.value = (preset && preset.name) ? preset.name : option.textContent;
         }
         if (els.providerModelsStatus) {
             els.providerModelsStatus.textContent = option.dataset.note || "";
@@ -2271,6 +2912,252 @@
         els.providerModelsPicker.appendChild(actions);
     }
 
+    /// 测试连接：只报告成功/失败，不渲染模型
+    async function testProviderConnection() {
+        if (!els.providerFormBase.value.trim()) {
+            toast("请先选择供应商或填写 Base URL");
+            return;
+        }
+        setProviderStatus("测试中…", "");
+        try {
+            var models = await invokeFn("fetch_provider_models", {
+                baseUrl: els.providerFormBase.value.trim(),
+                apiKey: els.providerFormKey.value.trim() || null,
+                providerId: els.providerFormId.value.trim() || null
+            });
+            setProviderStatus("连接成功，可用模型 " + models.length + " 个", "ok");
+        } catch (err) {
+            setProviderStatus("连接失败：" + (err && err.message ? err.message : String(err)), "error");
+        }
+    }
+
+    var pickerModels = [];
+
+    /// 打开选模型弹窗
+    async function openModelPicker() {
+        if (!els.providerFormBase.value.trim()) {
+            toast("请先选择供应商或填写 Base URL");
+            return;
+        }
+        setProviderStatus("获取模型中…", "");
+        try {
+            pickerModels = await invokeFn("fetch_provider_models", {
+                baseUrl: els.providerFormBase.value.trim(),
+                apiKey: els.providerFormKey.value.trim() || null,
+                providerId: els.providerFormId.value.trim() || null
+            });
+        } catch (err) {
+            setProviderStatus("获取失败：" + (err && err.message ? err.message : String(err)), "error");
+            return;
+        }
+        if (!pickerModels.length) {
+            setProviderStatus("该接口没有返回模型，可用「+ 添加模型」手动填写", "error");
+            return;
+        }
+        setProviderStatus("已获取 " + pickerModels.length + " 个模型", "ok");
+        var search = document.getElementById("provider-picker-search");
+        if (search) {
+            search.value = "";
+        }
+        renderPickerList("");
+        var modal = document.getElementById("provider-picker-modal");
+        if (modal) {
+            modal.hidden = false;
+        }
+    }
+
+    function renderPickerList(keyword) {
+        var list = document.getElementById("provider-picker-list");
+        if (!list) {
+            return;
+        }
+        list.textContent = "";
+        var key = (keyword || "").trim().toLowerCase();
+        var checked = 0;
+        pickerModels.forEach(function (id) {
+            if (key && id.toLowerCase().indexOf(key) === -1) {
+                return;
+            }
+            var row = document.createElement("label");
+            row.className = "provider-picker-item";
+            var box = document.createElement("input");
+            box.type = "checkbox";
+            box.checked = true;
+            box.value = id;
+            box.addEventListener("change", updatePickerCount);
+            var text = document.createElement("span");
+            text.textContent = id;
+            row.appendChild(box);
+            row.appendChild(text);
+            list.appendChild(row);
+            if (box.checked) {
+                checked += 1;
+            }
+        });
+        updatePickerCount();
+    }
+
+    function updatePickerCount() {
+        var list = document.getElementById("provider-picker-list");
+        var count = document.getElementById("provider-picker-count");
+        if (!list || !count) {
+            return;
+        }
+        var all = list.querySelectorAll('input[type="checkbox"]');
+        var checked = list.querySelectorAll('input[type="checkbox"]:checked');
+        count.textContent = "已选 " + checked.length + " / " + all.length;
+    }
+
+    function closeModelPicker() {
+        var modal = document.getElementById("provider-picker-modal");
+        if (modal) {
+            modal.hidden = true;
+        }
+    }
+
+    function applyPickedModels() {
+        var list = document.getElementById("provider-picker-list");
+        if (!list) {
+            return;
+        }
+        var picked = [];
+        Array.prototype.forEach.call(list.querySelectorAll('input[type="checkbox"]:checked'), function (box) {
+            picked.push(box.value);
+        });
+        if (!picked.length) {
+            toast("没有勾选任何模型");
+            return;
+        }
+        var merged = parseModelIds();
+        picked.forEach(function (id) {
+            if (merged.indexOf(id) === -1) {
+                merged.push(id);
+            }
+        });
+        els.providerFormModels.value = merged.join(", ");
+        renderProviderModelRows();
+        closeModelPicker();
+    }
+
+    function setProviderStatus(text, kind) {
+        var el = document.getElementById("provider-models-status");
+        if (!el) {
+            return;
+        }
+        el.textContent = text || "";
+        el.hidden = !text;
+        el.classList.toggle("is-ok", kind === "ok");
+        el.classList.toggle("is-error", kind === "error");
+    }
+    function openAddModelModal() {
+        var modal = document.getElementById("provider-add-modal");
+        var idInput = document.getElementById("provider-add-id");
+        var nameInput = document.getElementById("provider-add-name");
+        if (idInput) { idInput.value = ""; }
+        if (nameInput) { nameInput.value = ""; }
+        if (modal) { modal.hidden = false; }
+        if (idInput) { idInput.focus(); }
+    }
+
+    function closeAddModelModal() {
+        var modal = document.getElementById("provider-add-modal");
+        if (modal) { modal.hidden = true; }
+    }
+    /// 把模型目录（含显示名）写入 settings.externalModels
+    async function persistProviderModels(providerId) {
+        if (!settings || !providerId) {
+            return;
+        }
+        var ids = parseModelIds();
+        var list = (settings.externalModels || []).filter(function (item) {
+            return item.providerId !== providerId;
+        });
+        ids.forEach(function (modelId) {
+            list.push({
+                id: providerId + ":" + modelId,
+                providerId: providerId,
+                modelId: modelId,
+                displayName: providerDisplayNames[modelId] || "",
+                verified: true
+            });
+        });
+        var next = JSON.parse(JSON.stringify(settings));
+        next.externalModels = list;
+        try {
+            var result = await invokeFn("save_settings", { settings: next });
+            settingsView = result && result.view ? result.view : settingsView;
+            settings = settingsView && settingsView.settings ? settingsView.settings : next;
+            refreshDefaultChatSelect();
+        } catch (err) {
+            setSettingsStatus("模型目录保存失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
+    /// 模型目录行：左列显示名可改，右列官方 id 只读
+    var providerDisplayNames = {};
+
+    function parseModelIds() {
+        return els.providerFormModels.value.split(",").map(function (item) {
+            return item.trim();
+        }).filter(Boolean);
+    }
+
+    function renderProviderModelRows() {
+        var box = document.getElementById("provider-model-rows");
+        if (!box) {
+            return;
+        }
+        box.textContent = "";
+        parseModelIds().forEach(function (id) {
+            var row = document.createElement("div");
+            row.className = "provider-model-row";
+
+            var display = document.createElement("input");
+            display.type = "text";
+            display.value = providerDisplayNames[id] || id;
+            display.placeholder = "显示名";
+            display.addEventListener("input", function () {
+                providerDisplayNames[id] = display.value.trim();
+            });
+
+            var official = document.createElement("input");
+            official.type = "text";
+            official.value = id;
+            official.readOnly = true;
+            official.title = "官方 id，请求时使用，不建议修改";
+
+            var savedIds = ((settings && settings.externalModels) || [])
+                .filter(function (item) {
+                    return item.providerId === els.providerFormId.value.trim();
+                })
+                .map(function (item) {
+                    return item.modelId;
+                });
+            if (savedIds.indexOf(id) === -1) {
+                var untested = document.createElement("span");
+                untested.className = "provider-tag";
+                untested.textContent = "未测";
+                row.appendChild(untested);
+            }
+
+            var del = document.createElement("button");
+            del.type = "button";
+            del.className = "ghost";
+            del.textContent = "删除";
+            del.addEventListener("click", function () {
+                var rest = parseModelIds().filter(function (item) {
+                    return item !== id;
+                });
+                els.providerFormModels.value = rest.join(", ");
+                renderProviderModelRows();
+            });
+
+            row.appendChild(display);
+            row.appendChild(official);
+            row.appendChild(del);
+            box.appendChild(row);
+        });
+    }
+
     async function fetchProviderModels() {
         if (!invokeFn) {
             return;
@@ -2294,9 +3181,14 @@
             });
             if (!models || !models.length) {
                 if (els.providerModelsStatus) {
-                    els.providerModelsStatus.textContent = "未获取到模型，请手动填写";
+                    els.providerModelsStatus.textContent = "未获取到模型：该接口可能不支持 /models，请在「高级」里手动填写模型 id";
                 }
                 return;
+            }
+            renderProviderModelRows();
+            // 拉取成功：默认全选，用户再取消不要的
+            if (!els.providerFormModels.value.trim()) {
+                els.providerFormModels.value = models.join(", ");
             }
             renderModelPicker(models);
             if (els.providerModelsStatus) {
@@ -2324,6 +3216,13 @@
         els.providerFormName.value = provider ? provider.name : "";
         els.providerFormBase.value = provider ? provider.baseUrl : "";
         els.providerFormModels.value = provider ? (provider.models || []).join(", ") : "";
+        providerDisplayNames = {};
+        (settings && settings.externalModels ? settings.externalModels : []).forEach(function (item) {
+            if (provider && item.providerId === provider.id && item.displayName) {
+                providerDisplayNames[item.modelId] = item.displayName;
+            }
+        });
+        renderProviderModelRows();
         if (els.providerModelsPicker) {
             els.providerModelsPicker.hidden = true;
             els.providerModelsPicker.textContent = "";
@@ -2333,6 +3232,16 @@
         }
         if (els.providerFormPreset) {
             els.providerFormPreset.value = "";
+            if (provider) {
+                // 按已保存的 Base URL 反查预设，回填供应商下拉
+                var savedBase = (provider.baseUrl || "").replace(/\/+$/, "");
+                (providerPresets || []).forEach(function (item) {
+                    var candidate = (item.baseUrl || "").replace(/\/+$/, "");
+                    if (candidate && candidate === savedBase) {
+                        els.providerFormPreset.value = item.id;
+                    }
+                });
+            }
         }
         els.providerFormDefault.value = provider ? (provider.defaultModel || "") : "";
         els.providerFormKey.value = "";
@@ -2372,6 +3281,14 @@
         }
         try {
             await invokeFn("save_provider", { provider: provider });
+            // 先重新加载设置，避免用旧快照写 externalModels 时把刚保存的 Provider 覆盖掉
+            await loadSettings();
+            await persistProviderModels(provider.id);
+            try {
+                await invokeFn("test_provider", { providerId: provider.id, force: true });
+            } catch (err) {
+                /* 健康探测失败不影响保存结果 */
+            }
             await loadProviders();
             await loadSettings();
             closeProviderForm();
@@ -2401,12 +3318,37 @@
         }
     }
 
+    /// 只清除加密密钥，保留 Provider 配置
+    async function clearProviderKey(provider) {
+        if (!window.confirm("清除「" + provider.name + "」的 API Key？\n\nProvider 配置会保留，但之后需要重新填写并验证 Key 才能使用。")) {
+            return;
+        }
+        try {
+            await invokeFn("clear_provider_key", { providerId: provider.id });
+            try {
+                await invokeFn("test_provider", { providerId: provider.id, force: true });
+            } catch (err) {
+                /* 健康探测失败不影响保存结果 */
+            }
+            await loadProviders();
+            await loadSettings();
+            setSettingsStatus("已清除密钥");
+        } catch (err) {
+            setSettingsStatus("清除密钥失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
+
     async function removeProvider(provider) {
         if (!window.confirm("删除 Provider「" + provider.name + "」？相关 API Key 与导出授权也会一并删除。")) {
             return;
         }
         try {
             await invokeFn("delete_provider", { providerId: provider.id });
+            try {
+                await invokeFn("test_provider", { providerId: provider.id, force: true });
+            } catch (err) {
+                /* 健康探测失败不影响保存结果 */
+            }
             await loadProviders();
             await loadSettings();
             setSettingsStatus("Provider 已删除");
@@ -2418,6 +3360,11 @@
     async function revokeExport(providerId) {
         try {
             await invokeFn("revoke_file_export", { providerId: providerId });
+            try {
+                await invokeFn("test_provider", { providerId: provider.id, force: true });
+            } catch (err) {
+                /* 健康探测失败不影响保存结果 */
+            }
             await loadProviders();
             await loadSettings();
             setSettingsStatus("已撤销该 Provider 的文件导出授权");
@@ -2554,6 +3501,20 @@
 
     async function executeExternal(context, typing) {
         if (!invokeFn) {
+            return null;
+        }
+        var gate = await cloudGate(context.sessionId);
+        if (gate === "cancel") {
+            if (typing) {
+                typing.remove();
+            }
+            return null;
+        }
+        if (gate === "local") {
+            if (typing) {
+                typing.remove();
+            }
+            toast("已取消云端调用：请在本地重新发送这条消息");
             return null;
         }
         var outcome = await invokeFn("send_external_message", {
@@ -2752,8 +3713,49 @@
         if (els.cloudAuditRefresh) {
             els.cloudAuditRefresh.addEventListener("click", loadCloudAudit);
         }
-        if (els.settingsDataMigrate) {
-            els.settingsDataMigrate.addEventListener("click", migrateDataRoot);
+        if (els.openDataDir) {
+            els.openDataDir.addEventListener("click", function () {
+                openLocalPath("data", els.settingsDataStatus);
+            });
+        }
+        if (els.pickDataDir) {
+            els.pickDataDir.addEventListener("click", pickDataDir);
+        }
+        if (els.settingsDataSave) {
+            els.settingsDataSave.addEventListener("click", saveDataRoot);
+        }
+        if (els.settingsDataCancel) {
+            els.settingsDataCancel.addEventListener("click", cancelPendingDataRoot);
+        }
+        if (els.restartNow) {
+            els.restartNow.addEventListener("click", doCloseApp);
+        }
+        var gateBindings = [
+            ["cloud-gate-local", "local"],
+            ["cloud-gate-once", "once"],
+            ["cloud-gate-never", "never"],
+            ["cloud-gate-cancel", "cancel"]
+        ];
+        gateBindings.forEach(function (pair) {
+            var button = document.getElementById(pair[0]);
+            if (button) {
+                button.addEventListener("click", function () {
+                    if (cloudGateResolve) {
+                        cloudGateResolve(pair[1]);
+                    }
+                });
+            }
+        });
+        if (els.restartAbort) {
+            els.restartAbort.addEventListener("click", abortDataSwitch);
+        }
+        var dataClose = document.getElementById("settings-data-close");
+        if (dataClose) {
+            dataClose.addEventListener("click", doCloseApp);
+        }
+        var dataAbort = document.getElementById("settings-data-abort");
+        if (dataAbort) {
+            dataAbort.addEventListener("click", abortDataSwitch);
         }
         els.newSessionBtn.addEventListener("click", function () {
             createSession(currentRole);
@@ -2818,6 +3820,18 @@
         });
         els.roleFormCancel.addEventListener("click", closeRoleForm);
         els.roleForm.addEventListener("submit", submitRoleForm);
+        if (els.roleFormGenerate) {
+            els.roleFormGenerate.addEventListener("click", generateRolePrompt);
+        }
+        if (els.roleFormGenerateStatus) {
+            els.roleFormGenerateStatus.addEventListener("click", async function () {
+                if (!lastGenerateError) {
+                    return;
+                }
+                var copied = await copyText(lastGenerateError);
+                toast(copied ? "失败原因已复制" : "复制失败，请查看 data/logs 下的日志");
+            });
+        }
         els.settingsPanel.addEventListener("click", function (event) {
             if (event.target === els.settingsPanel) {
                 closeSettings();
@@ -2832,8 +3846,77 @@
         if (els.providerFormPreset) {
             els.providerFormPreset.addEventListener("change", applyProviderPreset);
         }
+        var addModelBtn = document.getElementById("provider-add-model");
+        if (addModelBtn) {
+            addModelBtn.addEventListener("click", openAddModelModal);
+        }
+        ["provider-add-close", "provider-add-cancel"].forEach(function (id) {
+            var btn = document.getElementById(id);
+            if (btn) {
+                btn.addEventListener("click", closeAddModelModal);
+            }
+        });
+        var addConfirm = document.getElementById("provider-add-confirm");
+        if (addConfirm) {
+            addConfirm.addEventListener("click", function () {
+                var idInput = document.getElementById("provider-add-id");
+                var nameInput = document.getElementById("provider-add-name");
+                var id = idInput ? idInput.value.trim() : "";
+                if (!id) {
+                    toast("请填写官方模型 id");
+                    return;
+                }
+                var ids = parseModelIds();
+                if (ids.indexOf(id) === -1) {
+                    ids.push(id);
+                }
+                els.providerFormModels.value = ids.join(", ");
+                if (nameInput && nameInput.value.trim()) {
+                    providerDisplayNames[id] = nameInput.value.trim();
+                }
+                renderProviderModelRows();
+                closeAddModelModal();
+            });
+        }        var testConn = document.getElementById("provider-test-conn");
+        if (testConn) {
+            testConn.addEventListener("click", testProviderConnection);
+        }
+        var pickSearch = document.getElementById("provider-picker-search");
+        if (pickSearch) {
+            pickSearch.addEventListener("input", function () {
+                renderPickerList(pickSearch.value);
+            });
+        }
+        var pickToggle = document.getElementById("provider-picker-toggle");
+        if (pickToggle) {
+            pickToggle.addEventListener("click", function () {
+                var list = document.getElementById("provider-picker-list");
+                var boxes = list ? list.querySelectorAll('input[type="checkbox"]') : [];
+                var allChecked = true;
+                Array.prototype.forEach.call(boxes, function (box) {
+                    if (!box.checked) {
+                        allChecked = false;
+                    }
+                });
+                Array.prototype.forEach.call(boxes, function (box) {
+                    box.checked = !allChecked;
+                });
+                pickToggle.textContent = allChecked ? "全选" : "取消全选";
+                updatePickerCount();
+            });
+        }
+        ["provider-picker-close", "provider-picker-cancel"].forEach(function (id) {
+            var btn = document.getElementById(id);
+            if (btn) {
+                btn.addEventListener("click", closeModelPicker);
+            }
+        });
+        var pickApply = document.getElementById("provider-picker-apply");
+        if (pickApply) {
+            pickApply.addEventListener("click", applyPickedModels);
+        }
         if (els.providerFetchModels) {
-            els.providerFetchModels.addEventListener("click", fetchProviderModels);
+            els.providerFetchModels.addEventListener("click", openModelPicker);
         }
         if (els.openModelsDir) {
             els.openModelsDir.addEventListener("click", function () {
@@ -2842,7 +3925,7 @@
         }
         if (els.openLogsDir) {
             els.openLogsDir.addEventListener("click", function () {
-                openLocalPath("logs");
+                openLocalPath("logs", els.settingsLogsStatus);
             });
         }
         if (els.scanModelsBtn) {
@@ -3003,15 +4086,21 @@
         els.settingsOllamaHost = $("settings-ollama-host");
         els.settingsRouter = $("settings-router");
         els.settingsCoordinator = $("settings-coordinator");
-        els.settingsModelsDir = $("settings-models-dir");
-        els.settingsDataRoot = $("settings-data-root");
-        els.settingsLogsDir = $("settings-logs-dir");
+        els.openDataDir = $("open-data-dir");
+        els.pickDataDir = $("pick-data-dir");
+        els.settingsDataName = $("settings-data-name");
+        els.settingsDataPendingRow = $("settings-data-pending-row");
+        els.settingsDataPending = $("settings-data-pending");
+        els.settingsDataSave = $("settings-data-save");
+        els.settingsDataCancel = $("settings-data-cancel");
         els.settingsStatus = $("settings-status");
         els.settingsSave = $("settings-save");
         els.settingsRoleList = $("settings-role-list");
         els.roleAddBtn = $("role-add-btn");
         els.roleForm = $("role-form");
-        els.roleFormId = $("role-form-id");
+        els.roleFormIdHint = $("role-form-id-hint");
+        els.roleFormGenerate = $("role-form-generate");
+        els.roleFormGenerateStatus = $("role-form-generate-status");
         els.roleFormName = $("role-form-name");
         els.roleFormDesc = $("role-form-desc");
         els.roleFormPrompt = $("role-form-prompt");
@@ -3070,9 +4159,12 @@
         els.settingsCloudProfile = $("settings-cloud-profile");
         els.cloudAuditRefresh = $("cloud-audit-refresh");
         els.cloudAuditList = $("cloud-audit-list");
-        els.settingsDataTarget = $("settings-data-target");
-        els.settingsDataMigrate = $("settings-data-migrate");
         els.settingsDataStatus = $("settings-data-status");
+        els.settingsLogsStatus = $("settings-logs-status");
+        els.restartNotice = $("restart-notice");
+        els.restartNoticeText = $("restart-notice-text");
+        els.restartNow = $("restart-now");
+        els.restartAbort = $("restart-abort");
         els.onboarding = $("onboarding");
         els.onboardingTitle = $("onboarding-title");
         els.onboardingBody = $("onboarding-body");
@@ -3127,6 +4219,7 @@
         loadSettings();
         loadProviders();
         loadProviderPresets();
+        loadLocalModels();
     }
 
     if (document.readyState === "loading") {

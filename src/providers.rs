@@ -2,11 +2,14 @@ use crate::error::{AppError, Result};
 use crate::settings::ProviderSettings;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 const HEALTH_TTL: Duration = Duration::from_secs(300);
 const TEST_TIMEOUT: Duration = Duration::from_millis(1500);
 const CHAT_TIMEOUT: Duration = Duration::from_secs(120);
+/// 模型列表请求的超时（TLS 握手 + 响应，宽松一些避免误判为不可达）
+const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_EXPORT_FILE_BYTES: usize = 64 * 1024;
 const MAX_EXPORT_FILES: usize = 5;
 const MAX_EXPORT_TOTAL_BYTES: usize = 128 * 1024;
@@ -122,6 +125,47 @@ impl HealthEntry {
     }
 }
 
+/// 清洗供应商名称：剥掉装饰后缀并限制长度（防止 UI 文案落库）
+pub fn clean_name(name: &str) -> String {
+    let mut text = name.trim().to_string();
+    for suffix in [" · 海外", " · 未实测", " · 已停用", " · 国内", " · 推荐"] {
+        while text.ends_with(suffix) {
+            text.truncate(text.len() - suffix.len());
+            text = text.trim_end().to_string();
+        }
+    }
+    if text.chars().count() > 40 {
+        text = text.chars().take(40).collect();
+    }
+    text
+}
+
+/// 把连接错误翻译成能直接照着排查的中文诊断
+pub fn classify_error(message: &str) -> String {
+    let lower = message.to_lowercase();
+    if message.contains("HTTP 401") || message.contains("HTTP 403") {
+        "Key 无效或没有权限（HTTP 401/403）".to_string()
+    } else if message.contains("HTTP 404") {
+        "接口或模型不存在（HTTP 404）：请检查 Base URL 与模型名".to_string()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "连接超时：请检查网络或代理".to_string()
+    } else if lower.contains("dns")
+        || lower.contains("failed to lookup")
+        || lower.contains("connect")
+        || lower.contains("refused")
+    {
+        "无法连接到服务器：请检查网络、Base URL 或代理设置".to_string()
+    } else if message.contains("HTTP 402") {
+        "账户余额不足（HTTP 402），请充值后重试".to_string()
+    } else if message.contains("HTTP 429") {
+        "请求过于频繁（HTTP 429），请稍后再试".to_string()
+    } else if message.contains("HTTP 5") {
+        "服务端错误（HTTP 5xx），可稍后重试".to_string()
+    } else {
+        message.to_string()
+    }
+}
+
 pub struct ExternalClient {
     http: reqwest::Client,
 }
@@ -166,21 +210,39 @@ impl ExternalClient {
         if !base.ends_with("/v1") {
             candidates.push(endpoint(base, "v1/models"));
         }
+        // 部分网关默认分页，追加 limit 参数尝试拿全量
+        candidates.push(format!("{}?limit=1000", endpoint(base, "v1/models")));
+        if base.ends_with("/v1") {
+            candidates.push(format!("{}?limit=1000", endpoint(base, "models")));
+        }
 
         let mut last_error = String::from("无法获取模型列表");
+        let mut collected: Vec<String> = Vec::new();
         for url in candidates {
             let mut request = self.http.get(&url);
             if !api_key.trim().is_empty() {
                 request = request.bearer_auth(api_key.trim());
             }
-            let response = match tokio::time::timeout(TEST_TIMEOUT, request.send()).await {
+            let started = Instant::now();
+            let response = match tokio::time::timeout(MODELS_TIMEOUT, request.send()).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(err)) => {
-                    last_error = format!("请求 {url} 失败：{err}");
+                    tracing::warn!(
+                        url = %url,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        error = %err,
+                        "models request failed (transport)"
+                    );
+                    last_error = format!("请求 {url} 失败：{}", error_chain(&err));
                     continue;
                 }
                 Err(_) => {
-                    last_error = format!("请求 {url} 超时");
+                    tracing::warn!(
+                        url = %url,
+                        timeout_ms = MODELS_TIMEOUT.as_millis() as u64,
+                        "models request timed out"
+                    );
+                    last_error = format!("请求 {url} 超时（{}s）", MODELS_TIMEOUT.as_secs());
                     continue;
                 }
             };
@@ -199,11 +261,19 @@ impl ExternalClient {
             let models = parse_model_list(&body);
             if !models.is_empty() {
                 tracing::info!(url = %url, count = models.len(), "provider models fetched");
-                return Ok(models);
+                collected.extend(models);
+            } else {
+                last_error = format!("{url} 返回空模型列表");
             }
-            last_error = format!("{url} 返回空模型列表");
         }
-        Err(AppError::External(last_error))
+        // 合并多个端点的结果：某些网关 /models 与 /v1/models 返回的清单不同，取并集
+        collected.sort();
+        collected.dedup();
+        if collected.is_empty() {
+            return Err(AppError::External(last_error));
+        }
+        tracing::info!(count = collected.len(), "provider models merged");
+        Ok(collected)
     }
 
     pub async fn chat(
@@ -350,16 +420,109 @@ fn normalize_protocol(raw: &str) -> Result<String> {
     }
 }
 
-/// Provider 预设：`group` 用于界面分组（official=官方直连，gateway=聚合网关）
-#[derive(Debug, Clone, Serialize)]
+/// 预设里的单个模型（能力与推理档位随版本更新）
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetModel {
+    pub id: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub reasoning: Option<PresetReasoning>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetReasoning {
+    /// 请求里承载推理档位的字段名，例如 reasoning_effort
+    #[serde(default)]
+    pub param: String,
+    #[serde(default)]
+    pub levels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetFile {
+    #[serde(default)]
+    pub version: u32,
+    #[serde(default)]
+    pub providers: Vec<ProviderPreset>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderPreset {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub group: String,
     pub base_url: String,
+    #[serde(default)]
     pub protocol: String,
+    #[serde(default)]
     pub note: String,
+    #[serde(default)]
+    pub models: Vec<PresetModel>,
+    /// 同一供应商的多个接入地址（如火山 Coding 套餐与按量计费）
+    #[serde(default)]
+    pub endpoints: Vec<PresetEndpoint>,
+    /// 小分类：cn = 国内，global = 海外
+    #[serde(default)]
+    pub region: String,
+    /// true = 我方未实测，仅按官方文档填写
+    #[serde(default)]
+    pub unverified: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresetEndpoint {
+    pub label: String,
+    pub base_url: String,
+    /// true = 界面只读（只有一个正确答案）
+    #[serde(default)]
+    pub locked: bool,
+}
+
+/// 读取预设文件版本号（缺失时回退 0）
+pub fn presets_version(app_root: &Path) -> u32 {
+    let path = app_root.join("config").join("providers.json");
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<PresetFile>(&text).ok())
+        .map(|file| file.version)
+        .unwrap_or(0)
+}
+
+/// 从 `config/providers.json` 读取预设（随版本更新），缺失或损坏时回退内置清单
+pub fn presets_from(app_root: &Path) -> Vec<ProviderPreset> {
+    let path = app_root.join("config").join("providers.json");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        match serde_json::from_str::<PresetFile>(&text) {
+            Ok(file) if !file.providers.is_empty() => {
+                tracing::info!(
+                    version = file.version,
+                    providers = file.providers.len(),
+                    "provider presets loaded"
+                );
+                return file.providers;
+            }
+            Ok(_) => {
+                tracing::warn!(path = %path.display(), "provider presets empty, using builtin")
+            }
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "provider presets parse failed")
+            }
+        }
+    }
+    presets()
 }
 
 fn preset(id: &str, name: &str, group: &str, base_url: &str, note: &str) -> ProviderPreset {
@@ -370,6 +533,10 @@ fn preset(id: &str, name: &str, group: &str, base_url: &str, note: &str) -> Prov
         base_url: base_url.to_string(),
         protocol: "openai-chat".to_string(),
         note: note.to_string(),
+        models: Vec::new(),
+        endpoints: Vec::new(),
+        region: String::new(),
+        unverified: false,
     }
 }
 
@@ -463,6 +630,17 @@ pub fn read_export_files(paths: &[String]) -> Vec<(String, String)> {
     }
 
     result
+}
+
+/// 展开错误链，便于定位是 DNS、TLS 还是连接被拒
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    let mut current = err.source();
+    while let Some(next) = current {
+        parts.push(next.to_string());
+        current = next.source();
+    }
+    parts.join(" <- ")
 }
 
 fn endpoint(base_url: &str, suffix: &str) -> String {

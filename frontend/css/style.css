@@ -40,6 +40,12 @@ html[data-theme="dark"] {
     box-sizing: border-box;
 }
 
+/* hidden 属性优先级：必须压过 .settings-row / .role-form 等的 display */
+[hidden] {
+    display: none !important;
+
+}
+
 html,
 body {
     height: 100%;
@@ -548,10 +554,9 @@ textarea {
 }
 
 .role-wheel-list {
-    height: 240px;
+    max-height: 240px;
     overflow-y: auto;
     scroll-snap-type: y mandatory;
-    padding: 96px 0;
     scrollbar-width: none;
 }
 
@@ -561,19 +566,19 @@ textarea {
 
 .role-wheel-item {
     display: flex;
-    flex-direction: column;
-    justify-content: center;
-    align-items: flex-start;
-    gap: 1px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     width: 100%;
-    height: 48px;
+    height: 40px;
     padding: 0 14px;
     border: none;
     background: transparent;
     color: var(--text);
     text-align: left;
     cursor: pointer;
-    scroll-snap-align: center;
+    scroll-snap-align: start;
     opacity: 0.55;
     transition: opacity 0.15s ease, background 0.15s ease;
 }
@@ -585,6 +590,9 @@ textarea {
 
 .role-wheel-item.active {
     opacity: 1;
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent);
+    border-radius: 8px;
 }
 
 .role-wheel-name {
@@ -592,9 +600,10 @@ textarea {
     font-weight: 600;
 }
 
-.role-wheel-desc {
-    color: var(--text-muted);
-    font-size: 11px;
+.role-wheel-check {
+    color: var(--accent);
+    font-size: 13px;
+    font-weight: 700;
 }
 
 .primary {
@@ -1268,15 +1277,27 @@ textarea {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 11px;
-    border-radius: 999px;
+    padding: 0 12px;
+    height: 30px;
+    border-radius: 8px;
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 30px;
     cursor: pointer;
     white-space: nowrap;
+}
+
+/* 沟通栏三个控件统一高度/字号/圆角 */
+.composer-left>.ghost,
+.composer-left>.local-only,
+.composer-left .role-pill {
+    height: 30px;
+    padding: 0 12px;
+    font-size: 12px;
+    line-height: 30px;
+    border-radius: 8px;
 }
 
 .local-only .dot {
@@ -1298,4 +1319,289 @@ textarea {
 
 .local-only:hover {
     border-color: var(--accent);
+}
+
+/* 角色标签（设置页：本地优先 / 不默认记忆等） */
+.role-tags {
+    display: block;
+    margin-top: 2px;
+    color: var(--accent);
+    font-size: 11px;
+}
+
+/* 可点击复制的状态文本（生成提示词失败原因） */
+.settings-status.copyable {
+    cursor: pointer;
+    text-decoration: underline dotted;
+}
+
+/* 生成提示词的状态行：独立一行，不挤压按钮 */
+.role-generate-status {
+    display: block;
+    margin: 2px 0 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 设置页分组：数据目录 / 日志目录，用间距区分、不画分隔线 */
+.settings-block + .settings-block {
+    margin-top: 14px;
+}
+
+/* 数据目录状态提示：紧贴切换控件，失败/成功用颜色区分 */
+.settings-block .settings-status {
+    display: block;
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.settings-block .settings-status.is-error {
+    color: #c62828;
+}
+
+.settings-block .settings-status.is-ok {
+    color: #2e7d32;
+}
+
+/* 切换完成浮层：必须高于设置面板（.modal 的 40）与 toast（60） */
+#restart-notice {
+    z-index: 70;
+}
+
+/* 云端频次闸门浮层 */
+#cloud-gate {
+    z-index: 70;
+}
+
+/* 外部模型表单：密钥在上、模型目录在下 */
+.provider-key-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.provider-key-row input {
+    flex: 1;
+}
+
+.provider-model-section {
+    margin-top: 10px;
+}
+
+.provider-model-head {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+}
+
+.provider-model-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.provider-model-row input[readonly] {
+    background: var(--surface-muted);
+    color: var(--text-muted);
+}
+
+.provider-advanced {
+    margin-top: 10px;
+}
+
+.provider-advanced summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 8px;
+}
+
+/* 外部模型：密钥输入占满剩余空间，两个按钮只占自身宽度 */
+.provider-key-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.provider-key-row>input#provider-form-key {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: auto;
+}
+
+.provider-key-row>.ghost {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 0;
+    padding: 0 14px;
+    white-space: nowrap;
+}
+
+/* 供应商选择：放在表单最上方 */
+.provider-preset-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.provider-preset-row label {
+    font-size: 12px;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+.provider-preset-row select {
+    flex: 1;
+}
+
+/* 供应商下拉：给足高度，别细长 */
+.provider-preset-row select {
+    flex: 1;
+    min-height: 34px;
+    padding: 6px 10px;
+    font-size: 13px;
+}
+
+/* 选择模型弹窗 */
+#provider-picker-modal {
+    z-index: 70;
+}
+
+.provider-picker-tools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.provider-picker-tools input {
+    flex: 1;
+}
+
+.provider-picker-list {
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+}
+
+.provider-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 13px;
+}
+
+.provider-picker-item input {
+    flex: 0 0 auto;
+}
+
+/* 选模型弹窗：更舒展的排版 */
+#provider-picker-modal .modal-card {
+    width: min(560px, 100%);
+    max-height: 82vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#provider-picker-modal .modal-head {
+    align-items: center;
+}
+
+#provider-picker-modal .settings-body {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.provider-picker-tools {
+    margin: 8px 0 8px;
+    align-items: stretch;
+}
+
+.provider-picker-tools input {
+    flex: 1;
+    min-height: 32px;
+}
+
+.provider-picker-tools .ghost {
+    width: auto;
+    min-height: 32px;
+}
+
+.provider-picker-list {
+    flex: 1;
+    min-height: 220px;
+    margin-top: 4px;
+    background: var(--surface-muted);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 8px 10px;
+}
+
+.provider-picker-item {
+    padding: 8px 8px;
+    gap: 10px;
+    border-radius: 8px;
+    margin-bottom: 2px;
+    cursor: pointer;
+}
+
+.provider-picker-item:hover {
+    background: var(--surface);
+}
+
+.provider-picker-item:has(input:checked) {
+    background: var(--accent-soft);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+#provider-picker-modal .settings-footer {
+    align-items: center;
+}
+
+/* 「+ 添加模型」按钮：缩短并居中 */
+#provider-add-model {
+    display: block;
+    width: auto;
+    margin: 8px auto 0;
+    padding: 0 18px;
+}
+
+#provider-add-modal {
+    z-index: 70;
+}
+
+#provider-add-modal .modal-card {
+    width: min(460px, 100%);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#provider-add-modal input {
+    width: 100%;
+}
+
+/* 供应商卡片上的状态徽标（与名称分离，测试通过后自动消失） */
+.provider-tag {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 18px;
+    color: var(--text-muted);
+    background: var(--surface-muted);
+    border: 1px solid var(--border);
+    vertical-align: middle;
 }

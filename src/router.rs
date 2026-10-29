@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 /// 路由层上下文：分类只看消息开头，不需要长上下文（KV cache 减半，首 token 更快）。
-const ROUTER_NUM_CTX: u32 = 2048;
+pub const ROUTER_NUM_CTX: u32 = 2048;
 /// 送进路由的输入截断长度（分类足够，避免长消息撑爆 2K 上下文）。
 const ROUTER_INPUT_CHARS: usize = 1200;
 
@@ -30,10 +30,11 @@ pub const EVAL_SAMPLES: [(&str, &str); 10] = [
 const ROUTER_SYSTEM_PROMPT: &str = r#"你是“小明同学”的路由分类器，只负责判断用户消息应由哪个角色处理。
 只输出一个 JSON 对象，不要输出解释、Markdown、代码块或多余文字。
 
-role 只能是以下三个值之一：
+role 只能是以下四个值之一：
 - "dev"：软件工程相关。包括写代码、读代码、改代码、解释编程概念或语言特性、文件操作、终端命令、Git、调试、测试、项目结构。
-- "general"：日常对话与通用问答。包括闲聊、问候、通用知识、写作、翻译、生活建议、与软件工程无关的问题。
-- "custom-role"：用户明确要求垂直领域专家，或问题属于法律、医疗、财务等专业咨询。
+- "general"：日常对话与通用问答。包括闲聊、问候、通用知识、写作、翻译、生活建议、法律财务等专业咨询的泛问。
+- "health-coach"：健康与医疗相关。包括症状描述、身体不适、检查报告解读、用药与饮食禁忌、挂号科室、作息与康复建议。
+- "mind-companion"：情绪与心理相关。包括情绪低落、焦虑、压力、人际困扰、失眠、自我认知、心理疏导与陪伴。
 
 intent 只能是：chat、task、role_switch、config、knowledge、system、multimodal、unknown。
 confidence 是 0 到 1 之间的小数，表示你对 role 判断的置信度。
@@ -71,7 +72,12 @@ struct RawDecision {
     confidence: Option<Value>,
 }
 
-pub async fn route(ollama: &OllamaClient, config: &AppConfig, content: &str) -> RouterDecision {
+pub async fn route(
+    ollama: &OllamaClient,
+    config: &AppConfig,
+    content: &str,
+    num_ctx: u32,
+) -> RouterDecision {
     let started = Instant::now();
     let model = config.router.model.clone();
     let text = content.trim();
@@ -86,7 +92,7 @@ pub async fn route(ollama: &OllamaClient, config: &AppConfig, content: &str) -> 
     let timeout = Duration::from_millis(config.router.timeout_ms.max(1));
     let options = ChatOptions {
         temperature: 0.1,
-        num_ctx: ROUTER_NUM_CTX,
+        num_ctx,
         num_predict: config.router.max_output_tokens.max(32),
         seed: None,
     }
@@ -205,7 +211,13 @@ fn normalize_role(raw: &str) -> Option<&'static str> {
             Some("general")
         }
         "custom-role" | "custom_role" | "customrole" | "vertical" | "垂直" | "垂直角色"
-        | "专家" | "domain" => Some("custom-role"),
+        | "专家" | "domain" => Some("general"),
+        "health-coach" | "health" | "medical" | "健康" | "医疗" | "医生" | "症状" => {
+            Some("health-coach")
+        }
+        "mind-companion" | "mind" | "psych" | "心理" | "情绪" | "情感" => {
+            Some("mind-companion")
+        }
         _ => None,
     }
 }
@@ -257,7 +269,7 @@ fn router_schema() -> Value {
         "properties": {
             "role": {
                 "type": "string",
-                "enum": ["dev", "general", "custom-role"]
+                "enum": ["dev", "general", "health-coach", "mind-companion"]
             },
             "intent": {
                 "type": "string",

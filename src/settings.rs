@@ -3,17 +3,59 @@ use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ModelSetting {
+    /// 目录内唯一 ID：`{providerId}:{modelId}`
+    pub id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub display_name: String,
+    /// 是否用真实请求验证过
+    #[serde(default)]
+    pub verified: bool,
+    /// 是否启用（决定是否出现在聊天页的模型列表）
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 排序序号（越小越靠前，供应商内独立）
+    #[serde(default)]
+    pub sort_index: i64,
+    /// 上次失败原因（无则为空）
+    #[serde(default)]
+    pub last_error: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl ModelSetting {
+    pub fn make_id(provider_id: &str, model_id: &str) -> String {
+        format!("{provider_id}:{model_id}")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UserSettings {
     pub theme: String,
     pub models: ModelSettings,
     pub data: DataSettings,
+    /// 外部模型目录（供应商层 → 模型层）
+    #[serde(default)]
+    pub external_models: Vec<ModelSetting>,
     pub onboarding_completed: bool,
     pub providers: Vec<ProviderSettings>,
     pub default_chat: String,
     pub cloud: CloudSettings,
     pub file_export_grants: Vec<FileExportGrant>,
+    /// 本机实测成功过的供应商 id（实测过一次即视为已验证）
+    #[serde(default)]
+    pub verified_providers: Vec<String>,
+    /// 已应用的供应商预设版本（用于提示"预设有更新"）
+    #[serde(default)]
+    pub preset_version: u32,
 }
 
 impl Default for UserSettings {
@@ -22,11 +64,14 @@ impl Default for UserSettings {
             theme: "system".to_string(),
             models: ModelSettings::default(),
             data: DataSettings::default(),
+            external_models: Vec::new(),
             onboarding_completed: false,
             providers: Vec::new(),
             default_chat: "local".to_string(),
             cloud: CloudSettings::default(),
             file_export_grants: Vec::new(),
+            verified_providers: Vec::new(),
+            preset_version: 0,
         }
     }
 }
@@ -79,8 +124,6 @@ pub struct CloudSettings {
     pub mode: String,
     /// 「仅本地」开关的反面（决策 33）：false=仅本地（默认），true=自动模式，复杂任务可自动上云。
     pub auto_escalate: bool,
-    /// 会话云端预算上限（token）；0 表示不限。超额自动降级为仅本地。
-    pub budget_tokens: u64,
     /// 能力档位 profile（small=3B+7B，large=14B+）
     pub profile: String,
 }
@@ -91,7 +134,6 @@ impl Default for CloudSettings {
             enabled: false,
             mode: "localFirst".to_string(),
             auto_escalate: false,
-            budget_tokens: 50_000,
             profile: "small".to_string(),
         }
     }
@@ -157,10 +199,109 @@ pub fn load(data_root: &Path, app: &AppConfig, models: &ModelsConfig) -> UserSet
     if settings.default_chat.trim().is_empty() {
         settings.default_chat = "local".to_string();
     }
+    migrate_external_models(&mut settings);
     settings
 }
 
+/// 旧配置迁移：把 `providers[].defaultModel` 提升为独立的模型目录，并把 defaultChat 指向模型
+pub fn migrate_external_models(settings: &mut UserSettings) {
+    for provider in &settings.providers {
+        let mut candidates: Vec<String> = provider
+            .models
+            .iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect();
+        if !provider.default_model.trim().is_empty() {
+            candidates.push(provider.default_model.trim().to_string());
+        }
+        for model_id in candidates {
+            let id = ModelSetting::make_id(&provider.id, &model_id);
+            if settings.external_models.iter().any(|item| item.id == id) {
+                continue;
+            }
+            settings.external_models.push(ModelSetting {
+                id,
+                provider_id: provider.id.clone(),
+                model_id,
+                display_name: String::new(),
+                verified: true,
+                enabled: true,
+                sort_index: 0,
+                last_error: String::new(),
+            });
+        }
+    }
+
+    // 旧的 defaultChat 存的是供应商 id，改成该供应商的默认模型 id
+    if let Some(provider) = settings
+        .providers
+        .iter()
+        .find(|item| item.id == settings.default_chat)
+    {
+        if !provider.default_model.trim().is_empty() {
+            settings.default_chat =
+                ModelSetting::make_id(&provider.id, provider.default_model.trim());
+        }
+    }
+    // 指到不存在的模型就退回本地
+    if settings.default_chat != "local"
+        && !settings
+            .external_models
+            .iter()
+            .any(|item| item.id == settings.default_chat)
+    {
+        settings.default_chat = "local".to_string();
+    }
+}
+
+/// 规范化模型目录：去空、去重、重建 id、剔除已不存在的供应商，并校正 defaultChat
+pub fn normalize_external_models(settings: &mut UserSettings) {
+    let providers: Vec<String> = settings
+        .providers
+        .iter()
+        .map(|item| item.id.clone())
+        .collect();
+    let mut cleaned: Vec<ModelSetting> = Vec::new();
+    for entry in settings.external_models.drain(..) {
+        let provider_id = entry.provider_id.trim().to_string();
+        let model_id = entry.model_id.trim().to_string();
+        if provider_id.is_empty() || model_id.is_empty() {
+            continue;
+        }
+        if !providers.iter().any(|id| id == &provider_id) {
+            continue;
+        }
+        let id = ModelSetting::make_id(&provider_id, &model_id);
+        if cleaned.iter().any(|item| item.id == id) {
+            continue;
+        }
+        cleaned.push(ModelSetting {
+            id,
+            provider_id,
+            model_id,
+            display_name: entry.display_name.trim().to_string(),
+            verified: entry.verified,
+            enabled: entry.enabled,
+            sort_index: entry.sort_index,
+            last_error: entry.last_error.trim().to_string(),
+        });
+    }
+    settings.external_models = cleaned;
+
+    if settings.default_chat != "local"
+        && !settings
+            .external_models
+            .iter()
+            .any(|item| item.id == settings.default_chat)
+    {
+        settings.default_chat = "local".to_string();
+    }
+}
+
 pub fn save(data_root: &Path, mut settings: UserSettings) -> Result<UserSettings> {
+    migrate_external_models(&mut settings);
+    normalize_external_models(&mut settings);
     if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
         settings.theme = "system".to_string();
     }
@@ -284,5 +425,94 @@ mod tests {
         apply_model_overrides(&settings, &mut app);
         assert_eq!(app.router.model, "router-x");
         assert_eq!(app.coordinator.model, "coordinator-x");
+    }
+
+    #[test]
+    fn migrates_provider_default_model_into_catalog() {
+        let mut settings = UserSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            enabled: true,
+            models: vec!["deepseek-reasoner".to_string()],
+            default_model: "deepseek-chat".to_string(),
+            protocol: "openai-chat".to_string(),
+        });
+        settings.default_chat = "deepseek".to_string();
+
+        migrate_external_models(&mut settings);
+
+        let ids: Vec<String> = settings
+            .external_models
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        assert!(ids.contains(&"deepseek:deepseek-chat".to_string()));
+        assert!(ids.contains(&"deepseek:deepseek-reasoner".to_string()));
+        assert_eq!(settings.default_chat, "deepseek:deepseek-chat");
+    }
+
+    #[test]
+    fn normalizes_external_models_and_default_chat() {
+        let mut settings = UserSettings::default();
+        settings.providers.push(ProviderSettings {
+            id: "deepseek".to_string(),
+            name: "DeepSeek".to_string(),
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            enabled: true,
+            models: vec![],
+            default_model: "deepseek-chat".to_string(),
+            protocol: "openai-chat".to_string(),
+        });
+        settings.external_models = vec![
+            ModelSetting {
+                id: " wrong ".to_string(),
+                provider_id: " deepseek ".to_string(),
+                model_id: " deepseek-chat ".to_string(),
+                display_name: String::new(),
+                verified: false,
+                enabled: true,
+                sort_index: 0,
+                last_error: String::new(),
+            },
+            ModelSetting {
+                id: "dup".to_string(),
+                provider_id: "deepseek".to_string(),
+                model_id: "deepseek-chat".to_string(),
+                display_name: String::new(),
+                verified: false,
+                enabled: true,
+                sort_index: 0,
+                last_error: String::new(),
+            },
+            ModelSetting {
+                id: "ghost:model".to_string(),
+                provider_id: "ghost".to_string(),
+                model_id: "model".to_string(),
+                display_name: String::new(),
+                verified: false,
+                enabled: true,
+                sort_index: 0,
+                last_error: String::new(),
+            },
+        ];
+        settings.default_chat = "deepseek:deepseek-chat".to_string();
+
+        normalize_external_models(&mut settings);
+
+        assert_eq!(settings.external_models.len(), 1, "去重并剔除未知供应商");
+        assert_eq!(settings.external_models[0].id, "deepseek:deepseek-chat");
+        assert_eq!(settings.default_chat, "deepseek:deepseek-chat");
+    }
+
+    #[test]
+    fn resets_default_chat_when_model_missing() {
+        let mut settings = UserSettings {
+            default_chat: "ghost:missing".to_string(),
+            ..Default::default()
+        };
+        migrate_external_models(&mut settings);
+        assert_eq!(settings.default_chat, "local");
     }
 }

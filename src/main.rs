@@ -59,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
             if message.trim().is_empty() {
                 anyhow::bail!(
-                    "用法：cargo run -- chat [--role dev|general|custom-role] [--yes] 你的消息"
+                    "用法：cargo run -- chat [--role dev|general|health-coach|mind-companion] [--yes] 你的消息"
                 );
             }
 

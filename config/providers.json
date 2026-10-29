@@ -1,0 +1,145 @@
+{
+    "version":  4,
+    "comment":  "预设分三层：group 是大分类（official=直连 / gateway=中间代理 / custom=自定义），region 是小分类（cn / global），unverified 表示我方未实测。模型一律由 /models 实时拉取，不写在预设里。",
+    "providers":  [
+                      {
+                          "id":  "deepseek",
+                          "name":  "DeepSeek",
+                          "group":  "official",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://api.deepseek.com",
+                          "models":  [
+
+                                     ],
+                          "note":  "已实测：/models 返回 deepseek-flash、deepseek-v4-pro"
+                      },
+                      {
+                          "id":  "moonshot",
+                          "name":  "Moonshot（Kimi）",
+                          "group":  "official",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://api.moonshot.cn/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "官方 OpenAI 兼容接口"
+                      },
+                      {
+                          "id":  "qwen",
+                          "name":  "阿里云百炼（通义千问）",
+                          "group":  "official",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "DashScope 兼容模式"
+                      },
+                      {
+                          "id":  "zhipu",
+                          "name":  "智谱 GLM",
+                          "group":  "official",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://open.bigmodel.cn/api/paas/v4",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "官方 OpenAI 兼容接口"
+                      },
+                      {
+                          "id":  "siliconflow",
+                          "name":  "硅基流动 SiliconFlow",
+                          "group":  "gateway",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://api.siliconflow.cn/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "聚合网关，模型众多"
+                      },
+                      {
+                          "id":  "volcano",
+                          "name":  "火山方舟",
+                          "group":  "gateway",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://ark.cn-beijing.volces.com/api/coding/v3",
+                          "models":  [
+
+                                     ],
+                          "note":  "默认 Coding 套餐；按量计费在端点里切换",
+                          "endpoints":  [
+                                            {
+                                                "label":  "Coding 套餐",
+                                                "baseUrl":  "https://ark.cn-beijing.volces.com/api/coding/v3",
+                                                "locked":  true
+                                            },
+                                            {
+                                                "label":  "按量 Token",
+                                                "baseUrl":  "https://ark.cn-beijing.volces.com/api/v3",
+                                                "locked":  true
+                                            }
+                                        ]
+                      },
+                      {
+                          "id":  "groq",
+                          "name":  "Groq",
+                          "group":  "gateway",
+                          "region":  "global",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://api.groq.com/openai/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "海外推理服务，需海外网络"
+                      },
+                      {
+                          "id":  "opencode-go",
+                          "name":  "OpenCode Go（订阅网关）",
+                          "group":  "gateway",
+                          "region":  "global",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://opencode.ai/zen/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "订阅制聚合网关，模型随订阅更新"
+                      },
+                      {
+                          "id":  "openrouter",
+                          "name":  "OpenRouter",
+                          "group":  "gateway",
+                          "region":  "global",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "https://openrouter.ai/api/v1",
+                          "models":  [
+
+                                     ],
+                          "unverified":  true,
+                          "note":  "海外聚合网关，需海外网络"
+                      },
+                      {
+                          "id":  "custom",
+                          "name":  "自定义网关",
+                          "group":  "custom",
+                          "region":  "cn",
+                          "protocol":  "openai-chat",
+                          "baseUrl":  "",
+                          "models":  [
+
+                                     ],
+                          "note":  "OpenAI 兼容网关：地址自行填写，模型用「获取模型」自动拉取"
+                      }
+                  ]
+}
