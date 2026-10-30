@@ -1,5 +1,5 @@
 {
-    "version":  4,
+    "version":  6,
     "comment":  "预设分三层：group 是大分类（official=直连 / gateway=中间代理 / custom=自定义），region 是小分类（cn / global），unverified 表示我方未实测。模型一律由 /models 实时拉取，不写在预设里。",
     "providers":  [
                       {
@@ -109,7 +109,7 @@
                           "group":  "gateway",
                           "region":  "global",
                           "protocol":  "openai-chat",
-                          "baseUrl":  "https://opencode.ai/zen/v1",
+                          "baseUrl":  "https://opencode.ai/inference/go/v1",
                           "models":  [
 
                                      ],

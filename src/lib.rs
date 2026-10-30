@@ -27,6 +27,8 @@ pub mod settings;
 pub mod subagent;
 pub mod tasks;
 pub mod tools;
+pub mod kb;
+pub mod usage;
 pub mod util;
 
 pub use coordinator::ToolTrace;

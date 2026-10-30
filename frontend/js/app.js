@@ -692,8 +692,8 @@
 
     function updateStatus(extra) {
         var router = invokeFn
-            ? (realReady ? "●3B 路由" : "●3B 未连接")
-            : "●3B 浏览器预览";
+            ? (realReady ? ("●" + localModelLabel()) : "●本地模型未连接")
+            : "●本地模型（浏览器预览）";
         var routeText = "判定=- | 置信度=-";
         if (routing) {
             routeText = "路由中…";
@@ -741,6 +741,106 @@
         return !!(settings && settings.cloud && settings.cloud.autoEscalate);
     }
 
+    /// 主界面「云端供应商」卡片：显示当前供应商余额/状态，60 秒刷新一次
+    var localMetaText = "";
+    var usageTimer = null;
+    var usageCache = { value: "", note: "", at: 0 };
+
+    /// 主界面「今日用量」卡片：云端/本地汇总 + 勾选的供应商额度
+    async function refreshUsageCard() {
+        var cloudEl = document.getElementById("usage-cloud-line");
+        var localEl = document.getElementById("usage-local-line");
+        var blocksEl = document.getElementById("usage-blocks");
+        var updatedEl = document.getElementById("usage-updated");
+        if (!cloudEl || !blocksEl) {
+            return;
+        }
+        function money(value) {
+            return "¥" + Number(value || 0).toFixed(2);
+        }
+        try {
+            var total = await invokeFn("usage_summary", { period: "today" });
+            var local = await invokeFn("usage_summary", { period: "today", providerId: "local" });
+            var cloud = {
+                cost: Math.max(0, (total.cost || 0) - (local.cost || 0)),
+                requests: Math.max(0, (total.requests || 0) - (local.requests || 0)),
+                tokensIn: Math.max(0, (total.tokensIn || 0) - (local.tokensIn || 0)),
+                tokensOut: Math.max(0, (total.tokensOut || 0) - (local.tokensOut || 0))
+            };
+            cloudEl.textContent = cloud.requests === 0 ? "云端  今日暂无调用" : "云端  " + money(cloud.cost) + " · " + cloud.requests + " 次 · 输入 " +
+                Math.round(cloud.tokensIn / 1000) + "k / 输出 " + Math.round(cloud.tokensOut / 1000) + "k";
+            localMetaText = (local.requests || 0) + " 次 · 约 " +
+                Math.round(((local.tokensIn || 0) + (local.tokensOut || 0)) / 1000) + "k tokens";
+
+
+
+            localEl.textContent = (local.requests || 0) === 0 ? "本地  今日暂无调用" : "本地  约 " +
+                Math.round(((local.tokensIn || 0) + (local.tokensOut || 0)) / 1000) + "k tokens · " +
+                local.requests + " 次";
+        } catch (err) {
+            cloudEl.textContent = "云端数据不可用";
+            localEl.textContent = "本地数据不可用";
+        }
+        if (updatedEl) {
+            var now = new Date();
+            updatedEl.textContent = now.getHours().toString().padStart(2, "0") + ":" +
+                now.getMinutes().toString().padStart(2, "0");
+        }
+        blocksEl.textContent = "";
+        if (!localMetaText) { localMetaText = "—"; }
+        var localBlock = document.createElement("div");
+        localBlock.className = "usage-block";
+        var localHead = document.createElement("div");
+        localHead.className = "usage-block-head";
+        localHead.textContent = "本地（Ollama）";
+        var localMeta = document.createElement("div");
+        localMeta.className = "usage-provider-note";
+        localMeta.id = "usage-local-meta";
+        localMeta.textContent = localMetaText;
+        localBlock.appendChild(localHead);
+        localBlock.appendChild(localMeta);
+        blocksEl.appendChild(localBlock);
+
+        var ids = (settings && settings.usageProviders) || [];
+        if (!ids.length) {
+            var hint = document.createElement("div");
+            hint.className = "usage-provider-note";
+            hint.textContent = "未选择供应商，可在「设置-费用」勾选。";
+            blocksEl.appendChild(hint);
+            return;
+        }
+        for (var i = 0; i < ids.length; i += 1) {
+            var provider = providerById(ids[i]);
+            if (!provider) {
+                continue;
+            }
+            var block = document.createElement("div");
+            block.className = "usage-block";
+            var head = document.createElement("div");
+            head.className = "usage-block-head";
+            head.textContent = provider.name;
+            block.appendChild(head);
+            var body = document.createElement("div");
+            body.className = "usage-provider-note";
+            body.textContent = "查询中…";
+            block.appendChild(body);
+            blocksEl.appendChild(block);
+            if (provider.hasApiKey) {
+                fetchProviderQuota(provider, body);
+            } else {
+                body.textContent = "未配置 API Key";
+            }
+        }
+    }
+    function startUsageTimer() {
+        refreshUsageCard();
+        if (usageTimer) {
+            window.clearInterval(usageTimer);
+        }
+        var minutes = (settings && settings.usageRefreshMinutes) || 5;
+        minutes = Math.min(60, Math.max(1, minutes));
+        usageTimer = window.setInterval(refreshUsageCard, minutes * 60000);
+    }
     function renderLocalOnlyToggle() {
         if (!els.localOnlyBtn) {
             return;
@@ -755,6 +855,309 @@
             : "仅本地：只跑本地模型；需要云端协助时会弹窗确认。点击切到自动模式";
     }
 
+    /// 状态栏显示的本地模型名（取当前协调模型，未配置时回退通用文案）
+    function localModelLabel() {
+        var name = settings && settings.models && settings.models.coordinator;
+        return name ? "本地 · " + name : "本地模型";
+    }
+    /// 当前使用的模型引用（全局默认，聊天框与设置页共用）
+    /// 是否处于「自动·云端」模式（与底部开关同一来源）
+    function isAutoCloud() {
+        return autoEscalateOn();
+    }
+    function roleModelRef() {
+        var s = settings || {};
+        return s.defaultChat || "local";
+    }
+    /// 从 modelRef 取供应商 id（"local" 或 "provider:model"）
+    function providerOfRef(ref) {
+        var text = String(ref || "");
+        var idx = text.indexOf(":");
+        return idx > 0 ? text.slice(0, idx) : text;
+    }
+
+    /// 模型名（不带供应商前缀）
+    function modelNameOnly(ref) {
+        if (!ref || ref === "local") {
+            var coordinator = settings && settings.models ? settings.models.coordinator : "";
+            return coordinator || "本地模型";
+        }
+        var item = ((settings && settings.externalModels) || []).filter(function (entry) {
+            return entry.id === ref;
+        })[0];
+        return item ? (item.displayName || item.modelId) : ref;
+    }
+    function composerModelLabel(ref) {
+        if (!ref || ref === "local") {
+            var coordinator = settings && settings.models ? settings.models.coordinator : "";
+            return coordinator ? "本地 · " + coordinator : "本地模型";
+        }
+        var item = ((settings && settings.externalModels) || []).filter(function (entry) {
+            return entry.id === ref;
+        })[0];
+        if (!item) {
+            return ref;
+        }
+        var provider = providerById(item.providerId);
+        return (provider ? provider.name + " · " : "") + (item.displayName || item.modelId);
+    }
+
+    /// 弹窗顶部提示：当前模式与已选模型冲突时给出说明与跳转
+    function renderComposerModeBanner(cloudOnly, autoMode, currentRef) {
+        var banner = document.getElementById("composer-mode-banner");
+        if (!banner) {
+            return;
+        }
+        banner.textContent = "";
+        var text = "";
+        if (cloudOnly && currentRef === "local") {
+            text = "当前为「仅云端」模式，本地模型不可用。";
+        } else if (!autoMode && currentRef !== "local") {
+            text = "当前为「仅本地」模式，云端模型不可选。";
+        }
+        if (!text) {
+            banner.hidden = true;
+            return;
+        }
+        banner.hidden = false;
+        var span = document.createElement("span");
+        span.textContent = text;
+        banner.appendChild(span);
+        var jump = document.createElement("button");
+        jump.type = "button";
+        jump.className = "ghost";
+        jump.textContent = "去切换模式";
+        jump.addEventListener("click", function () {
+            closeComposerModelPicker();
+            openSettings("external");
+        });
+        banner.appendChild(jump);
+    }
+    var pendingModelRef = "";
+    function openComposerModelPicker() {
+        var modal = document.getElementById("composer-model-modal");
+        var list = document.getElementById("composer-model-list");
+        if (!modal || !list) {
+            return;
+        }
+        list.textContent = "";
+        var currentRef = roleModelRef();
+        var autoMode = isAutoCloud();
+        uiLog("[mode] cloud.mode=" + ((settings && settings.cloud && settings.cloud.mode) || "") +
+            " autoEscalate=" + ((settings && settings.cloud && settings.cloud.autoEscalate) ? "true" : "false") +
+            " autoMode=" + (autoMode ? "true" : "false"));
+        var cloudOnly = Boolean(settings && settings.cloud && settings.cloud.mode === "cloudOnly");
+
+        function addHeader(text) {
+            var header = document.createElement("div");
+            header.className = "provider-group-head";
+            header.textContent = text;
+            list.appendChild(header);
+        }
+
+        function addRow(ref, label, unavailable, reason) {
+            var row = document.createElement("div");
+            row.className = "composer-model-item" + (currentRef === ref ? " active" : "");
+            if (unavailable) {
+                row.classList.add("disabled");
+            }
+            var name = document.createElement("span");
+            name.textContent = label;
+            row.appendChild(name);
+            if (unavailable && reason) {
+                var why = document.createElement("span");
+                why.className = "disabled-reason";
+                why.textContent = reason;
+                row.appendChild(why);
+            }
+            if (currentRef === ref) {
+                var check = document.createElement("span");
+                check.className = "composer-check";
+                check.textContent = "✓";
+                row.appendChild(check);
+            }
+            row.addEventListener("click", function () {
+                if (unavailable) {
+                    return;
+                }
+                chooseComposerModel(ref);
+            });
+            list.appendChild(row);
+        }
+
+        // 本地组固定最后；先渲染供应商分组
+        var models = ((settings && settings.externalModels) || []).filter(function (item) {
+            return item.enabled !== false;
+        });
+        var providerOrder = (settings && settings.providerOrder) || [];
+        var providerIds = [];
+        models.forEach(function (item) {
+            if (providerIds.indexOf(item.providerId) === -1) {
+                providerIds.push(item.providerId);
+            }
+        });
+        providerIds.sort(function (a, b) {
+            var ia = providerOrder.indexOf(a);
+            var ib = providerOrder.indexOf(b);
+            return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+        });
+        providerIds.forEach(function (providerId) {
+            var provider = providerById(providerId);
+            addHeader(provider ? provider.name : providerId);
+            var order = (((settings || {}).modelOrder || {})[providerId]) || [];
+            var items = models.filter(function (item) {
+                return item.providerId === providerId;
+            }).sort(function (a, b) {
+                var ia = order.indexOf(a.modelId);
+                var ib = order.indexOf(b.modelId);
+                if (ia < 0 && ib < 0) {
+                    return 0;
+                }
+                return (ia < 0 ? 9999 : ia) - (ib < 0 ? 9999 : ib);
+            });
+            items.forEach(function (item) {
+                addRow(item.id, item.displayName || item.modelId, !autoMode, "仅本地模式");
+            });
+        });
+
+        addHeader("本地 ollama");
+        var coordinator = settings && settings.models ? settings.models.coordinator : "";
+        addRow("local", coordinator || "本地模型", cloudOnly, "仅云端模式");
+
+        renderComposerModeBanner(cloudOnly, autoMode, currentRef);
+        renderComposerLevelRow(currentRef);
+        modal.hidden = false;
+    }
+
+    /// 弹窗底部的推理等级行（仅当模型声明了等级时出现）
+    function renderComposerLevelRow(ref) {
+        var host = document.getElementById("composer-level-row");
+        if (!host) {
+            return;
+        }
+        host.textContent = "";
+        var levels = modelLevelsOf(ref);
+        if (!levels.length) {
+            host.hidden = true;
+            return;
+        }
+        host.hidden = false;
+        var label = document.createElement("span");
+        label.className = "composer-level-label";
+        label.textContent = "等级：";
+        host.appendChild(label);
+        var current = currentModelLevel(ref);
+        ["默认"].concat(levels).forEach(function (level) {
+            var value = level === "默认" ? "" : level;
+            var btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "ghost composer-level" + (current === value ? " active" : "");
+            btn.textContent = level;
+            btn.addEventListener("click", function () {
+                chooseComposerLevel(ref, value);
+            });
+            host.appendChild(btn);
+        });
+    }
+
+    /// 模型支持的等级列表（来自预设/配置，暂为空表示不支持）
+    function modelLevelsOf(ref) {
+        var item = ((settings && settings.externalModels) || []).filter(function (entry) {
+            return entry.id === ref;
+        })[0];
+        if (!item) {
+            return [];
+        }
+        return Array.isArray(item.reasoningLevels) ? item.reasoningLevels : [];
+    }
+
+    function currentModelLevel(ref) {
+        var map = (settings && settings.modelLevels) || {};
+        return map[ref] || "";
+    }
+
+    async function chooseComposerLevel(ref, level) {
+        if (!settings) {
+            return;
+        }
+        settings.modelLevels = settings.modelLevels || {};
+        if (level) {
+            settings.modelLevels[ref] = level;
+        } else {
+            delete settings.modelLevels[ref];
+        }
+        renderComposerLevelRow(ref);
+        renderComposerModel();
+        await saveComposerSettings();
+        pendingModelRef = "";
+        closeComposerModelPicker();
+    }
+
+    async function saveComposerSettings() {
+        var next = JSON.parse(JSON.stringify(settings));
+        try {
+            var result = await invokeFn("save_settings", { settings: next });
+            settingsView = result && result.view ? result.view : settingsView;
+            settings = settingsView && settingsView.settings ? settingsView.settings : next;
+        } catch (err) {
+            toast("保存失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
+    function closeComposerModelPicker() {
+        var modal = document.getElementById("composer-model-modal");
+        if (modal) {
+            modal.hidden = true;
+        }
+    }
+
+    async function chooseComposerModel(ref) {
+        if (!settings) {
+            return;
+        }
+        settings.defaultChat = ref;
+        refreshDefaultChatSelect();
+        renderComposerModel();
+        // 该模型支持推理等级时：先选等级再关闭，避免用户点不到
+        if (modelLevelsOf(ref).length) {
+            pendingModelRef = ref;
+            renderComposerLevelRow(ref);
+            renderComposerModel();
+            await saveComposerSettings();
+            return;
+        }
+        closeComposerModelPicker();
+        await saveComposerSettings();
+    }
+    /// 聊天框右侧显示当前使用的模型（外部模型优先，否则本地协调模型）
+    function bindComposerModelPicker() {
+        var btn = document.getElementById("composer-model-btn");
+        if (btn) {
+            btn.addEventListener("click", openComposerModelPicker);
+        }
+        ["composer-model-close", "composer-model-cancel"].forEach(function (id) {
+            var node = document.getElementById(id);
+            if (node) {
+                node.addEventListener("click", closeComposerModelPicker);
+            }
+        });
+    }
+    function renderComposerModel() {
+        var label = document.getElementById("composer-model-label");
+        if (!label) {
+            return;
+        }
+        var ref = roleModelRef();
+        var text = modelNameOnly(ref);
+        var level = currentModelLevel(ref);
+        if (level) {
+            text += " · " + level;
+        }
+        label.textContent = text;
+        var btn = document.getElementById("composer-model-btn");
+        if (btn) {
+            btn.title = "当前角色使用的模型：" + text + "（点击切换）";
+        }
+    }
     function noteRouteUsage(route) {
         if (!route) {
             return;
@@ -768,20 +1171,97 @@
         updateStatus();
     }
 
+    /// 只告知、不提供选择的提示框（用于阻止操作）
+    function uiAlert(message, title) {
+        return new Promise(function (resolve) {
+            var modal = document.getElementById("app-confirm-modal");
+            var text = document.getElementById("app-confirm-text");
+            var titleEl = document.getElementById("app-confirm-title");
+            var ok = document.getElementById("app-confirm-ok");
+            var cancel = document.getElementById("app-confirm-cancel");
+            if (!modal || !text || !ok || !cancel) {
+                resolve(true);
+                return;
+            }
+            if (titleEl) {
+                titleEl.textContent = title || "提示";
+            }
+            text.textContent = message;
+            cancel.hidden = true;
+            ok.textContent = "知道了";
+            modal.hidden = false;
+            function finish() {
+                modal.hidden = true;
+                cancel.hidden = false;
+                ok.textContent = "确定";
+                ok.removeEventListener("click", finish);
+                resolve(true);
+            }
+            ok.addEventListener("click", finish);
+        });
+    }
+    /// 应用内确认框（WebView2 里 window.confirm 可能被静默忽略）
+    function uiConfirm(message, title) {
+        return new Promise(function (resolve) {
+            var modal = document.getElementById("app-confirm-modal");
+            var text = document.getElementById("app-confirm-text");
+            var titleEl = document.getElementById("app-confirm-title");
+            var ok = document.getElementById("app-confirm-ok");
+            var cancel = document.getElementById("app-confirm-cancel");
+            if (!modal || !text || !ok || !cancel) {
+                resolve(false);
+                return;
+            }
+            if (titleEl) {
+                titleEl.textContent = title || "确认";
+            }
+            text.textContent = message;
+            modal.hidden = false;
+
+            function finish(value) {
+                modal.hidden = true;
+                ok.removeEventListener("click", onOk);
+                cancel.removeEventListener("click", onCancel);
+                resolve(value);
+            }
+            function onOk() { finish(true); }
+            function onCancel() { finish(false); }
+            ok.addEventListener("click", onOk);
+            cancel.addEventListener("click", onCancel);
+        });
+    }
     async function toggleLocalOnly() {
         if (!invokeFn || !settings) {
             toast("设置不可用，无法切换模式");
             return;
         }
         var next = !autoEscalateOn(); // true = 关闭「仅本地」，切到自动模式
+        uiLog("[toggle] click autoEscalate=" + (autoEscalateOn() ? "true" : "false") +
+            " next=" + (next ? "true" : "false") +
+            " defaultChat=" + ((settings && settings.defaultChat) || "") +
+            " label=" + (document.getElementById("composer-model-label") || {}).textContent);
         if (next) {
-            var confirmed = window.confirm(
+            var confirmed = await uiConfirm(
                 "关闭「仅本地」后：\n\n" +
                 "· 认知复杂的任务（长文档高质量总结、跨文件重构、架构分析、开放式多步规划）会直接使用云端，不再逐次询问；\n" +
                 "· 敏感内容（secrets.json / .env / .ssh / 密钥文件）与疑似密钥仍受红线保护，绝不上云；\n" +
                 "· 每次出网都会写入审计日志；会话云端预算用尽后自动降级为仅本地。\n\n" +
-                "确定切换到自动模式吗？");
+                "");
             if (!confirmed) {
+                return;
+            }
+        }
+        // 切回「仅本地」时，若当前选的是云端模型，先确认并说明后果
+        if (!next) {
+            var ref = (settings.defaultChat || "local");
+            uiLog("[toggle] check ref=" + ref);
+            if (ref !== "local") {
+                var label = modelNameOnly(ref);
+                await uiAlert(
+                    "当前使用的是云端模型「" + label + "」，不能切到仅本地。\n\n" +
+                    "请先在底部模型选择器里改成本地模型，再切换模式。",
+                    "无法切到仅本地");
+                uiLog("[toggle] blocked: cloud model in use ref=" + ref);
                 return;
             }
         }
@@ -1158,7 +1638,7 @@
         return [
             {
                 title: "欢迎使用小明同学",
-                body: "本地优先的个人 AI 助手：默认只跑本地模型（3B 路由 + 7B 大脑），敏感内容不离开这台机器。",
+                body: "本地优先的个人 AI 助手：默认只跑本地模型（本地路由模型 + 本地协调模型，可在「设置-模型」里自选），敏感内容不离开这台机器。",
                 list: [
                     "「仅本地」开关默认开启，复杂任务需要你放权才会用云端",
                     "secrets.json / .env / .ssh 等敏感内容即使放权也绝不上云",
@@ -1849,7 +2329,7 @@
 
     function mockReply(roleId, text) {
         return "[Mock] " + roleName(roleId) + " 收到：" + text +
-            "\n\n这是模拟回复。切换到「真实」模式可调用本地 qwen25-3b。";
+            "\n\n这是模拟回复。切换到「真实」模式可调用本地模型。";
     }
 
     function requestRoute(text) {
@@ -2069,6 +2549,12 @@
     }
 
     function showSettingsTab(name) {
+        if (name === "available") {
+            renderAvailableModels();
+        }
+        if (name === "usage") {
+            renderUsagePanel();
+        }
         var tabs = document.querySelectorAll(".settings-tab");
         var panels = document.querySelectorAll(".settings-tab-panel");
         for (var i = 0; i < tabs.length; i += 1) {
@@ -2244,6 +2730,8 @@
         fillModelSelect(els.settingsRouter, models.router || "", "");
         fillModelSelect(els.settingsCoordinator, models.coordinator || "", "");
         renderSettingsRoles();
+        renderAvailableModels();
+        renderComposerModel();
         applyTheme(s.theme || "system");
     }
 
@@ -2355,7 +2843,7 @@
         setGenerateStatus("");
     }
 
-    /// 按角色名生成专业提示词（本地 7B，失败不覆盖已填内容）
+    /// 按角色名生成专业提示词（本地协调模型，失败不覆盖已填内容）
     async function generateRolePrompt() {
         if (!invokeFn) {
             return;
@@ -2410,6 +2898,8 @@
             var saved = await invokeFn("save_role", { role: role });
             await loadRoles();
             renderSettingsRoles();
+        renderAvailableModels();
+        renderComposerModel();
             closeRoleForm();
             setSettingsStatus("角色已保存（ID：" + ((saved && saved.id) || "-") + "）");
         } catch (err) {
@@ -2432,6 +2922,8 @@
             await invokeFn("delete_role", { roleId: role.id });
             await loadRoles();
             renderSettingsRoles();
+        renderAvailableModels();
+        renderComposerModel();
             await loadSessions(currentRole);
             setSettingsStatus("角色已删除");
         } catch (err) {
@@ -2470,6 +2962,7 @@
                 ? "已保存，重启应用后生效"
                 : "设置已保存");
         } catch (err) {
+            uiLog("[save] error=" + (err && err.message ? err.message : String(err)) + " stack=" + (err && err.stack ? String(err.stack).slice(0, 500) : ""));
             setSettingsStatus("保存失败：" + (err && err.message ? err.message : String(err)));
         } finally {
             els.settingsSave.disabled = false;
@@ -2545,18 +3038,18 @@
     function effectiveTarget() {
         var s = settings || {};
         var mode = s.cloud && s.cloud.mode;
-        var defaultChat = s.defaultChat || "local";
+        var defaultChat = roleModelRef();
         if (mode === "cloudOnly") {
             if (defaultChat === "local") {
                 return "error";
             }
-            var provider = providerById(defaultChat);
+            var provider = providerById(providerOfRef(defaultChat));
             return provider && provider.enabled && provider.hasApiKey ? defaultChat : "error";
         }
         if (defaultChat === "local") {
             return "local";
         }
-        var external = providerById(defaultChat);
+        var external = providerById(providerOfRef(defaultChat));
         return external && external.enabled && external.hasApiKey ? defaultChat : "local";
     }
 
@@ -2573,6 +3066,10 @@
         els.settingsDefaultChat.appendChild(local);
 
         // 两层结构：默认模型指向「供应商 : 模型」
+        if (!settings) {
+            box.textContent = "加载中…";
+            return;
+        }
         var catalog = (settings && settings.externalModels) || [];
         catalog.forEach(function (item) {
             var provider = providerById(item.providerId);
@@ -2613,7 +3110,7 @@
             var info = document.createElement("div");
             info.className = "provider-info";
             var name = document.createElement("strong");
-            var cleanName = String(provider.name || "").replace(/ · (海外|未实测|国内|推荐)/g, "");
+            var cleanName = String(provider.name || "").replace(/ · (海外|未实测|国内|推荐|已停用)/g, "");
             name.textContent = cleanName + (provider.enabled ? "" : " · 已停用");
             var presetInfo = null;
             for (var pi = 0; pi < (providerPresets || []).length; pi += 1) {
@@ -3092,6 +3589,578 @@
             setSettingsStatus("模型目录保存失败：" + (err && err.message ? err.message : String(err)));
         }
     }
+    /// 费用页：概览聚合 + 供应商额度卡
+    async function renderUsagePanel() {
+        function money(value) {
+            return "$" + Number(value || 0).toFixed(4);
+        }
+        function detail(summary) {
+            return "调用 " + (summary.requests || 0) + " 次 · 输入 " +
+                Math.round((summary.tokensIn || 0) / 1000) + "k / 输出 " +
+                Math.round((summary.tokensOut || 0) / 1000) + "k";
+        }
+        var periods = [
+            { period: "today", cost: "usage-today-cost", detail: "usage-today-detail" },
+            { period: "month", cost: "usage-month-cost", detail: "usage-month-detail" },
+            { period: "total", cost: "usage-total-cost", detail: "usage-total-detail" }
+        ];
+        for (var i = 0; i < periods.length; i += 1) {
+            var item = periods[i];
+            try {
+                var summary = await invokeFn("usage_summary", { period: item.period });
+                var costEl = document.getElementById(item.cost);
+                var detailEl = document.getElementById(item.detail);
+                if (costEl) {
+                    costEl.textContent = money(summary && summary.cost);
+                }
+                if (detailEl) {
+                    detailEl.textContent = detail(summary || {});
+                }
+            } catch (err) {
+                /* 聚合失败保持占位 */
+            }
+        }
+        var updated = document.getElementById("usage-updated");
+        if (updated) {
+            var now = new Date();
+            updated.textContent = "更新于 " + now.getHours().toString().padStart(2, "0") + ":" +
+                now.getMinutes().toString().padStart(2, "0");
+        }
+        renderUsageProviders();
+    }
+
+    /// 供应商额度：OpenCode 走 usage 接口渲染三条柱状图；DeepSeek 走余额
+    async function fetchProviderQuota(provider, host) {
+        host.textContent = "";
+        var isGo = provider.id === "opencode-go" || (provider.baseUrl || "").indexOf("opencode.ai") !== -1;
+        if (isGo) {
+            try {
+                var data = await invokeFn("go_usage", { providerId: provider.id });
+                var usage = data && data.usage ? data.usage : null;
+                if (!usage) {
+                    host.textContent = "额度接口未返回数据";
+                    return;
+                }
+                [{ key: "rolling", label: "滚动 5 小时" },
+                 { key: "weekly", label: "本周" },
+                 { key: "monthly", label: "本月" }].forEach(function (item) {
+                    var node = usage[item.key];
+                    if (!node || typeof node.percent !== "number") {
+                        return;
+                    }
+                    var row = document.createElement("div");
+                    row.className = "quota-row";
+                    var label = document.createElement("span");
+                    label.className = "quota-label";
+                    label.textContent = item.label;
+                    var track = document.createElement("span");
+                    track.className = "quota-track";
+                    var fill = document.createElement("span");
+                    var percent = Math.max(0, Math.min(100, node.percent));
+                    fill.className = "quota-fill " + (percent > 90 ? "danger" : percent > 70 ? "warn" : "ok");
+                    fill.style.width = percent === 0 ? "2px" : percent + "%";
+                    track.appendChild(fill);
+                    var value = document.createElement("span");
+                    value.className = "quota-value";
+                    value.textContent = percent + "%";
+                    row.appendChild(label);
+                    row.appendChild(track);
+                    row.appendChild(value);
+                    host.appendChild(row);
+                });
+            } catch (err) {
+                var reason = err && err.message ? err.message : String(err);
+                uiLog("[usage] go_usage failed provider=" + provider.id + " error=" + reason);
+                host.textContent = "额度查询失败：" + reason;
+            }
+            return;
+        }
+        try {
+            var result = await invokeFn("provider_balance", { providerId: provider.id });
+            var balance = result && typeof result[0] === "number" ? result[0] : null;
+            if (balance === null) {
+                host.textContent = "余额请登录控制台查看";
+                return;
+            }
+            var currency = (result && result[1]) || "";
+            host.textContent = "余额 " + (currency === "CNY" ? "¥" : "$") + balance.toFixed(2);
+        } catch (err) {
+            host.textContent = "余额请登录控制台查看";
+        }
+    }
+    /// 拉取 Go 套餐额度并渲染百分比
+    async function fetchGoUsage(providerId, noteEl) {
+        uiLog("[usage] go_usage request provider=" + providerId);
+        try {
+            var data = await invokeFn("go_usage", { providerId: providerId });
+            uiLog("[usage] go_usage ok provider=" + providerId + " keys=" + Object.keys(data || {}).join("/"));
+            var usage = data && data.usage ? data.usage : null;
+            if (!usage) {
+                noteEl.textContent = "额度接口未返回数据";
+                return;
+            }
+            function line(label, node) {
+                if (!node) {
+                    return "";
+                }
+                var percent = typeof node.percent === "number" ? node.percent : null;
+                var reset = node.resetsAt ? String(node.resetsAt).replace("T", " ").replace("Z", "") : "";
+                if (percent === null) {
+                    return "";
+                }
+                return label + " " + percent + "%" + (reset ? "（重置 " + reset + "）" : "");
+            }
+            var parts = [
+                line("滚动 5 小时", usage.rolling),
+                line("本周", usage.weekly),
+                line("本月", usage.monthly)
+            ].filter(Boolean);
+            noteEl.textContent = parts.length ? parts.join(" · ") : "额度字段缺失";
+        } catch (err) {
+            var reason = err && err.message ? err.message : String(err);
+            uiLog("[usage] go_usage failed provider=" + providerId + " error=" + reason);
+            noteEl.textContent = "额度查询失败：" + reason;
+        }
+    }
+    /// 供应商额度卡（本期只列已配置 Key 的供应商）
+    async function renderUsageProviders() {
+        var box = document.getElementById("usage-providers");
+        if (!box) {
+            return;
+        }
+        box.textContent = "";
+        // 直接向后端取最新供应商列表，避免依赖前端缓存是否已加载
+        var list = [];
+        try {
+            var fresh = await invokeFn("list_providers");
+            list = (fresh || []).filter(function (item) {
+                return item.id !== "local";
+            });
+            uiLog("[usage] fresh providers=" + list.length + " detail=" + list.map(function (item) {
+                return item.id + ":" + (item.hasApiKey ? "key" : "nokey");
+            }).join(","));
+        } catch (err) {
+            uiLog("[usage] providers fetch failed error=" + (err && err.message ? err.message : String(err)));
+            list = ((settings && settings.providers) || []).filter(function (item) {
+                return item.id !== "local";
+            });
+        }
+        if (!list.length) {
+            var empty = document.createElement("div");
+            empty.className = "usage-provider-note";
+            empty.textContent = "还没有云端供应商。请先在「云端供应商」里添加。";
+            box.appendChild(empty);
+            return;
+        }
+        list.forEach(function (provider) {
+            var card = document.createElement("div");
+            card.className = "usage-provider-card";
+            var head = document.createElement("div");
+            head.className = "usage-provider-head";
+            var dot = document.createElement("span");
+            dot.className = "status-dot " + (provider.hasApiKey ? "ok" : "unknown");
+            var name = document.createElement("strong");
+            name.textContent = provider.name;
+            head.appendChild(dot);
+            head.appendChild(name);
+            card.appendChild(head);
+            var show = document.createElement("label");
+            show.className = "provider-check";
+            var showBox = document.createElement("input");
+            showBox.type = "checkbox";
+            showBox.checked = ((settings && settings.usageProviders) || []).indexOf(provider.id) !== -1;
+            showBox.addEventListener("change", function () {
+                settings.usageProviders = settings.usageProviders || [];
+                var index = settings.usageProviders.indexOf(provider.id);
+                if (showBox.checked && index === -1) {
+                    settings.usageProviders.push(provider.id);
+                } else if (!showBox.checked && index !== -1) {
+                    settings.usageProviders.splice(index, 1);
+                }
+                saveComposerSettings();
+                refreshUsageCard();
+            });
+            show.appendChild(showBox);
+            show.appendChild(document.createTextNode(" 显示在主界面"));
+            head.appendChild(show);
+            card.appendChild(head);
+
+            var body = document.createElement("div");
+            body.className = "usage-provider-note";
+            body.textContent = provider.hasApiKey ? "额度查询中…" : "未配置 API Key";
+            card.appendChild(body);
+            if (provider.hasApiKey) {
+                fetchProviderQuota(provider, body);
+            }
+            box.appendChild(card);
+        });
+    }
+    function renderAvailableModels() {
+        try {
+            renderAvailableModelsInner();
+        } catch (err) {
+            var box = document.getElementById("available-model-list");
+            if (box) {
+                box.textContent = "可用模型渲染失败：" + (err && err.message ? err.message : String(err));
+            }
+        }
+    }
+
+    /// 固定展示的"本地模型"卡片：只读，来源是设置-模型里的路由/协调模型
+    function renderLocalModelCard(box) {
+        var router = settings && settings.models ? settings.models.router : "";
+        var coordinator = settings && settings.models ? settings.models.coordinator : "";
+        if (!router && !coordinator) {
+            return;
+        }
+        var card = document.createElement("div");
+        card.className = "available-card";
+        var head = document.createElement("div");
+        head.className = "available-card-head";
+        var dot = document.createElement("span");
+        dot.className = "status-dot ok";
+        var title = document.createElement("strong");
+        title.textContent = "本地（Ollama）";
+        var badge = document.createElement("span");
+        badge.className = "available-count-badge";
+        badge.textContent = "固定";
+        head.appendChild(dot);
+        head.appendChild(title);
+        head.appendChild(badge);
+        card.appendChild(head);
+
+        var row = document.createElement("div");
+        row.className = "available-model-row enabled";
+        var rowDot = document.createElement("span");
+        rowDot.className = "status-dot ok";
+        var block = document.createElement("div");
+        block.className = "model-name-block";
+        var name = document.createElement("span");
+        name.className = "name";
+        name.textContent = coordinator || router;
+        var id = document.createElement("span");
+        id.className = "id";
+        id.textContent = "协调 " + (coordinator || "-") + " · 路由 " + (router || "-");
+        block.appendChild(name);
+        block.appendChild(id);
+        row.appendChild(rowDot);
+        row.appendChild(block);
+        card.appendChild(row);
+        box.appendChild(card);
+    }
+    function renderAvailableModelsInner() {
+        var box = document.getElementById("available-model-list");
+        var summary = document.getElementById("available-summary");
+        if (!box) {
+            return;
+        }
+        if (!settings) {
+            box.textContent = "加载中…";
+            return;
+        }
+        var catalog = (settings && settings.externalModels) || [];
+        var enabled = catalog.filter(function (item) { return item.enabled !== false; });
+        if (summary) {
+            summary.textContent = "已启用 " + enabled.length + " / " + catalog.length;
+        }
+        box.textContent = "";
+        renderLocalModelCard(box);
+        if (!catalog.length) {
+            box.textContent = "还没有可用模型。请先到「云端供应商」获取模型。";
+            return;
+        }
+        var groups = {};
+        catalog.forEach(function (item) {
+            if (!groups[item.providerId]) {
+                groups[item.providerId] = [];
+            }
+            groups[item.providerId].push(item);
+        });
+        var providerOrder = ((settings && settings.providerOrder) || []).slice();
+        if (!providerOrder.length) {
+            providerOrder = ((settings && settings.providers) || []).map(function (item) {
+                return item.id;
+            });
+            if (providerOrder.indexOf("local") === -1) {
+                providerOrder.unshift("local");
+            }
+        }
+        var groupKeys = Object.keys(groups).sort(function (a, b) {
+            var ia = providerOrder.indexOf(a);
+            var ib = providerOrder.indexOf(b);
+            return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+        });
+        if (providerOrder.indexOf("local") === -1) {
+            providerOrder.unshift("local");
+        }
+        if (groupKeys.indexOf("local") === -1) {
+            groupKeys.push("local");
+            groupKeys.sort(function (a, b) {
+                var ia = providerOrder.indexOf(a);
+                var ib = providerOrder.indexOf(b);
+                return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib);
+            });
+        }
+        groupKeys.forEach(function (providerId) {
+            if (providerId === "local") {
+                return;
+            }
+            var provider = providerById(providerId);
+            var items = groups[providerId].slice();
+            var orderIds = ((settings && settings.modelOrder) || {})[providerId] || [];
+            if (orderIds.length) {
+                items.sort(function (a, b) {
+                    var ia = orderIds.indexOf(a.modelId);
+                    var ib = orderIds.indexOf(b.modelId);
+                    return (ia < 0 ? 9999 : ia) - (ib < 0 ? 9999 : ib);
+                });
+            } else {
+                items.sort(function (a, b) {
+                    return (a.sortIndex || 0) - (b.sortIndex || 0);
+                });
+            }
+            var card = document.createElement("div");
+            card.className = "available-card";
+
+            var head = document.createElement("div");
+            head.className = "available-card-head";
+            var okCount = items.filter(function (item) { return item.verified; }).length;
+            var failed = items.filter(function (item) { return item.lastError; });
+            var dot = document.createElement("span");
+            dot.className = "status-dot " + (okCount === items.length ? "ok" : okCount ? "warn" : "unknown");
+            var title = document.createElement("strong");
+            var rawName = provider ? String(provider.name || "") : providerId;
+            var cleanTitle = providerId === "local"
+                ? "本地（Ollama）"
+                : rawName.replace(/ · (海外|未实测|国内|推荐|已停用)/g, "");
+            title.textContent = cleanTitle;
+            var badge = document.createElement("span");
+            badge.className = "available-count-badge";
+            badge.textContent = "可用 " + okCount + "/" + items.length;
+            if (failed.length) {
+                badge.title = failed.length + " 个失败，原因：" + failed[0].lastError;
+            }
+            head.appendChild(dot);
+            head.appendChild(title);
+            head.appendChild(badge);
+
+            var headActions = document.createElement("div");
+            headActions.className = "available-head-actions";
+
+            var testBtn = document.createElement("button");
+            testBtn.type = "button";
+            testBtn.className = "ghost";
+            testBtn.textContent = availableTesting[providerId] ? "停止" : "全部测试";
+            testBtn.addEventListener("click", function () {
+                testProviderModels(providerId, items, testBtn);
+            });
+            headActions.appendChild(testBtn);
+
+            var upProv = document.createElement("button");
+            upProv.type = "button";
+            upProv.className = "ghost";
+            upProv.textContent = "↑";
+            upProv.title = "上移供应商";
+            upProv.addEventListener("click", function () {
+                moveProvider(providerId, -1);
+            });
+            var downProv = document.createElement("button");
+            downProv.type = "button";
+            downProv.className = "ghost";
+            downProv.textContent = "↓";
+            downProv.title = "下移供应商";
+            downProv.addEventListener("click", function () {
+                moveProvider(providerId, 1);
+            });
+            headActions.appendChild(upProv);
+            headActions.appendChild(downProv);
+            head.appendChild(headActions);
+            card.appendChild(head);
+
+            items.forEach(function (item) {
+                var row = document.createElement("div");
+                row.className = "available-model-row" + (item.enabled !== false ? " enabled" : "");
+
+                var rowDot = document.createElement("span");
+                rowDot.className = "status-dot " +
+                    (item.verified ? "ok" : item.lastError ? "bad" : "unknown");
+                if (item.lastError) {
+                    rowDot.title = item.lastError;
+                }
+
+                var nameBlock = document.createElement("div");
+                nameBlock.className = "model-name-block";
+                var nameSpan = document.createElement("span");
+                nameSpan.className = "name";
+                nameSpan.textContent = item.displayName || item.modelId;
+                var idSpan = document.createElement("span");
+                idSpan.className = "id";
+                idSpan.textContent = item.modelId;
+                nameBlock.appendChild(nameSpan);
+                nameBlock.appendChild(idSpan);
+
+                var actions = document.createElement("div");
+                actions.className = "available-row-actions";
+                var testOne = document.createElement("button");
+                testOne.type = "button";
+                testOne.className = "ghost";
+                testOne.textContent = "测试";
+                testOne.addEventListener("click", async function () {
+                    testOne.disabled = true;
+                    testOne.textContent = "测试中";
+                    try {
+                        await invokeFn("test_external_model", { modelId: item.id });
+                    } catch (err) {
+                        /* 结果已写回状态 */
+                    }
+                    await loadSettings();
+                    renderAvailableModels();
+                });
+                actions.appendChild(testOne);
+                var up = document.createElement("button");
+                up.type = "button";
+                up.className = "ghost";
+                up.textContent = "↑";
+                up.title = "上移";
+                up.addEventListener("click", function () {
+                    moveAvailableModel(item, -1);
+                });
+                var down = document.createElement("button");
+                down.type = "button";
+                down.className = "ghost";
+                down.textContent = "↓";
+                down.title = "下移";
+                down.addEventListener("click", function () {
+                    moveAvailableModel(item, 1);
+                });
+                actions.appendChild(up);
+                actions.appendChild(down);
+
+                var toggle = document.createElement("label");
+                toggle.className = "provider-check";
+                var checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = item.enabled !== false;
+                checkbox.addEventListener("change", function () {
+                    item.enabled = checkbox.checked;
+                    persistAvailableModels();
+                });
+                toggle.appendChild(checkbox);
+                toggle.appendChild(document.createTextNode(" 启用"));
+
+                row.appendChild(rowDot);
+                row.appendChild(nameBlock);
+                row.appendChild(actions);
+                row.appendChild(toggle);
+                card.appendChild(row);
+            });        box.appendChild(card);
+        });
+    }
+
+    /// 模型上下移动：顺序交给后端保存，避免前端快照被回写覆盖
+    async function moveAvailableModel(item, delta) {
+        if (!settings) {
+            return;
+        }
+        var providerId = item.providerId;
+        var ids = ((settings.modelOrder || {})[providerId] || []).slice();
+        if (!ids.length) {
+            ids = settings.externalModels
+                .filter(function (entry) { return entry.providerId === providerId; })
+                .map(function (entry) { return entry.modelId; });
+        }
+        var index = ids.indexOf(item.modelId);
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= ids.length) {
+            return;
+        }
+        ids.splice(index, 1);
+        ids.splice(target, 0, item.modelId);
+        try {
+            await invokeFn("set_model_order", { providerId: providerId, ids: ids });
+            await loadSettings();
+        } catch (err) {
+            setSettingsStatus("保存模型顺序失败：" + (err && err.message ? err.message : String(err)));
+        }
+        renderAvailableModels();
+    }
+    async function moveProvider(providerId, delta) {
+        if (!settings) {
+            return;
+        }
+        var order = (settings.providerOrder || []).slice();
+        if (!order.length) {
+            order = (settings.providers || []).map(function (item) { return item.id; });
+            if (order.indexOf("local") === -1) {
+                order.unshift("local");
+            }
+        }
+        if (providerId === "local") {
+            return;
+        }
+        var index = order.indexOf(providerId);
+        var target = index + delta;
+        if (index < 0 || target < 0 || target >= order.length) {
+            return;
+        }
+        order.splice(index, 1);
+        order.splice(target, 0, providerId);
+        uiLog("[order] move " + providerId + " delta=" + delta + " index=" + index + " target=" + target + " -> " + order.join(","));
+        try {
+            await invokeFn("set_provider_order", { ids: order });
+            await loadSettings();
+            uiLog("[order] saved, now=" + ((settings.providerOrder || []).join(",")));
+        } catch (err) {
+            setSettingsStatus("保存供应商顺序失败：" + (err && err.message ? err.message : String(err)));
+        }
+        renderAvailableModels();
+    }
+    var availableTesting = {};
+
+    /// 供应商内全部测试：串行 + 300ms 间隔，可中途停止
+    async function testProviderModels(providerId, items, button) {
+        if (availableTesting[providerId]) {
+            availableTesting[providerId] = false;
+            if (button) {
+                button.textContent = "全部测试";
+            }
+            return;
+        }
+        availableTesting[providerId] = true;
+        if (button) {
+            button.textContent = "停止";
+        }
+        for (var i = 0; i < items.length; i += 1) {
+            if (!availableTesting[providerId]) {
+                break;
+            }
+            try {
+                await invokeFn("test_external_model", { modelId: items[i].id });
+            } catch (err) {
+                /* 单个失败不影响后续 */
+            }
+            await new Promise(function (resolve) {
+                window.setTimeout(resolve, 300);
+            });
+        }
+        availableTesting[providerId] = false;
+        await loadSettings();
+        renderAvailableModels();
+        renderComposerModel();
+    }
+    async function persistAvailableModels() {
+        if (!settings) {
+            return;
+        }
+        var next = JSON.parse(JSON.stringify(settings));
+        try {
+            var result = await invokeFn("save_settings", { settings: next });
+            settingsView = result && result.view ? result.view : settingsView;
+            settings = settingsView && settingsView.settings ? settingsView.settings : next;
+        } catch (err) {
+            setSettingsStatus("保存可用模型失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
     /// 模型目录行：左列显示名可改，右列官方 id 只读
     var providerDisplayNames = {};
 
@@ -3380,7 +4449,19 @@
         providerPickerContext = context;
         els.externalPickerNote.textContent = note || "选择用哪个外部 Provider 继续回答。";
         els.externalPickerList.innerHTML = "";
-        var usable = availableProviders();
+        var catalog = ((settings && settings.externalModels) || [])
+            .filter(function (item) { return item.enabled !== false; })
+            .slice()
+            .sort(function (a, b) { return (a.sortIndex || 0) - (b.sortIndex || 0); });
+        var usable = catalog.map(function (item) {
+            var provider = providerById(item.providerId);
+            return {
+                id: item.id,
+                name: (provider ? provider.name : item.providerId) + " · " + (item.displayName || item.modelId),
+                defaultModel: item.modelId,
+                provider: provider
+            };
+        });
         usable.forEach(function (provider) {
             var item = document.createElement("div");
             item.className = "provider-item";
@@ -3389,7 +4470,7 @@
             var name = document.createElement("strong");
             name.textContent = provider.name;
             var detail = document.createElement("span");
-            detail.textContent = provider.defaultModel;
+            detail.textContent = provider.availableProviders === undefined ? provider.defaultModel : provider.defaultModel;
             info.appendChild(name);
             info.appendChild(detail);
             var actions = document.createElement("div");
@@ -3499,6 +4580,31 @@
         }
     }
 
+    /// 聊天失败时询问是否把该模型标记为不可用（只对账户/鉴权/模型类错误提示）
+    async function offerMarkModelUnavailable(modelId, message) {
+        var text = String(message || "");
+        var matched = ["401", "402", "404", "余额", "Key", "模型不存在"].some(function (token) {
+            return text.indexOf(token) !== -1;
+        });
+        if (!matched || !modelId) {
+            return;
+        }
+        var confirmed = window.confirm(
+            "模型「" + providerName(modelId) + "」调用失败：\n" + text +
+            "\n\n是否把它标记为不可用？标记后可随时在「可用模型」页重新测试。");
+        if (!confirmed) {
+            return;
+        }
+        try {
+            await invokeFn("record_model_error", { modelId: modelId, message: text });
+            await loadSettings();
+            renderAvailableModels();
+        renderComposerModel();
+            toast("已标记为不可用：" + providerName(modelId));
+        } catch (err) {
+            toast("标记失败：" + (err && err.message ? err.message : String(err)));
+        }
+    }
     async function executeExternal(context, typing) {
         if (!invokeFn) {
             return null;
@@ -3517,13 +4623,22 @@
             toast("已取消云端调用：请在本地重新发送这条消息");
             return null;
         }
-        var outcome = await invokeFn("send_external_message", {
-            role: context.role,
-            content: context.message,
-            sessionId: context.sessionId,
-            providerId: context.providerId,
-            includeContext: context.includeContext !== false
-        });
+        var outcome;
+        try {
+            outcome = await invokeFn("send_external_message", {
+                role: context.role,
+                content: context.message,
+                sessionId: context.sessionId,
+                providerId: context.providerId,
+                includeContext: context.includeContext !== false
+            });
+        } catch (err) {
+            if (typing) {
+                typing.remove();
+            }
+            await offerMarkModelUnavailable(context.providerId, err && err.message ? err.message : String(err));
+            throw err;
+        }
         if (outcome && outcome.status === "exportRequired" && outcome.gate) {
             if (typing) {
                 typing.remove();
@@ -3698,6 +4813,8 @@
 
     function bindEvents() {
         els.sendBtn.addEventListener("click", sendMessage);
+        startUsageTimer();
+        bindComposerModelPicker();
         els.clearBtn.addEventListener("click", clearCurrent);
         if (els.localOnlyBtn) {
             els.localOnlyBtn.addEventListener("click", toggleLocalOnly);
@@ -3803,14 +4920,10 @@
             }
         });
 
-        els.themeBtn.addEventListener("click", toggleTheme);
         els.settingsBtn.addEventListener("click", function () {
             openSettings("general");
         });
         els.settingsClose.addEventListener("click", closeSettings);
-        els.usageManage.addEventListener("click", function () {
-            openSettings("external");
-        });
         els.settingsSave.addEventListener("click", saveSettings);
         els.settingsThemeSelect.addEventListener("change", function () {
             applyTheme(els.settingsThemeSelect.value);
@@ -4079,7 +5192,6 @@
         els.roleWheel = $("role-wheel");
         els.roleWheelList = $("role-wheel-list");
         els.settingsBtn = $("settings-btn");
-        els.usageManage = $("usage-manage");
         els.settingsPanel = $("settings-panel");
         els.settingsClose = $("settings-close");
         els.settingsThemeSelect = $("settings-theme-select");
@@ -4173,7 +5285,6 @@
         els.onboardingSkip = $("onboarding-skip");
         els.onboardingNext = $("onboarding-next");
         els.statusBar = $("status-bar");
-        els.themeBtn = $("theme-btn");
         els.modeSelect = $("mode-select");
         els.backendInfo = $("backend-info");
         els.permPanel = $("permission-panel");

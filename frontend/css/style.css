@@ -1605,3 +1605,393 @@ textarea {
     border: 1px solid var(--border);
     vertical-align: middle;
 }
+
+/* 可用模型页：供应商大卡片 */
+.available-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.available-card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    background: var(--surface);
+}
+
+.available-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.available-card-head strong {
+    font-size: 14px;
+}
+
+.available-model-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 5px 0;
+    font-size: 13px;
+}
+
+.available-model-row .model-id {
+    color: var(--text-muted);
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.status-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+}
+
+.status-dot.ok { background: #2e7d32; }
+.status-dot.warn { background: #b26a00; }
+.status-dot.bad { background: #c62828; }
+.status-dot.unknown { background: var(--border); }
+
+/* 聊天框右侧：仅本地 + 当前模型 */
+.composer-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.composer-model {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 可用模型页：头部单行、徽章化、子项轻分隔 */
+.available-card {
+    padding: 14px 16px;
+}
+
+.available-card-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 6px;
+    white-space: nowrap;
+}
+
+.available-card-head strong {
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.available-count-badge {
+    font-size: 11px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: var(--surface-muted);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+.available-head-actions {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.available-head-actions .ghost {
+    width: auto;
+    padding: 2px 10px;
+    font-size: 12px;
+}
+
+.available-model-row {
+    display: grid;
+    grid-template-columns: 16px 1fr auto auto;
+    gap: 10px;
+    align-items: center;
+    padding: 8px 6px;
+    border-radius: 8px;
+}
+
+.available-model-row + .available-model-row {
+    border-top: 1px solid var(--border);
+}
+
+.available-model-row.enabled {
+    background: var(--surface-muted);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.model-name-block {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.model-name-block .name {
+    font-size: 13px;
+}
+
+.model-name-block .id {
+    font-size: 11px;
+    color: var(--text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.available-row-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.available-row-actions .ghost {
+    width: auto;
+    padding: 1px 8px;
+    font-size: 12px;
+}
+
+#composer-model-modal { z-index: 70; }
+
+#composer-model-modal .modal-card {
+    width: min(460px, 100%);
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+}
+
+#composer-model-modal .provider-list {
+    overflow-y: auto;
+    max-height: 46vh;
+}
+
+.composer-model-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+}
+
+.composer-model-item:hover { background: var(--surface-muted); }
+
+.composer-model-item.active {
+    background: var(--surface-muted);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* 聊天页模型选择器：供应商分组标题 + 无前缀条目 */
+.provider-group-head {
+    padding: 10px 10px 4px;
+    font-size: 11px;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+}
+
+.composer-model-item.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.composer-check {
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.composer-level-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px 0;
+    border-top: 1px solid var(--border);
+    margin-top: 8px;
+}
+
+.composer-level-label {
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.composer-level.active {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+.composer-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 10px 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: var(--surface-muted);
+    border: 1px solid var(--border);
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.composer-banner button {
+    width: auto;
+    padding: 1px 8px;
+    font-size: 12px;
+}
+
+.composer-model-item .disabled-reason {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-left: 8px;
+}
+
+/* 仅本地开关与模型按钮统一高度 */
+.composer-right .local-only,
+.composer-right .composer-model {
+    min-height: 32px;
+    height: 32px;
+    padding: 0 12px;
+    font-size: 13px;
+    border-radius: 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.composer-right .composer-model {
+    max-width: 240px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#app-confirm-modal { z-index: 80; }
+
+#app-confirm-modal .modal-card { width: min(440px, 100%); }
+
+#app-confirm-text { white-space: pre-wrap; line-height: 1.6; }
+
+.usage-cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.usage-metric {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    background: var(--surface);
+}
+
+.usage-metric-label {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.usage-metric-value {
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.usage-metric-sub {
+    font-size: 11px;
+    color: var(--text-muted);
+}
+
+.usage-provider-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.usage-provider-card {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+}
+
+.usage-provider-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.usage-provider-note {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 4px;
+}
+
+.quota-row {
+    display: grid;
+    grid-template-columns: 88px 1fr 40px;
+    gap: 8px;
+    align-items: center;
+    margin-top: 6px;
+    font-size: 12px;
+}
+
+.quota-label {
+    color: var(--text-muted);
+}
+
+.quota-track {
+    height: 8px;
+    border-radius: 999px;
+    background: var(--surface-muted);
+    overflow: hidden;
+}
+
+.quota-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+}
+
+.quota-fill.warn { background: #b26a00; }
+.quota-fill.danger { background: #c62828; }
+
+.quota-value {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.usage-provider-head .provider-check {
+    margin-left: auto;
+}
+
+.usage-line {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.usage-blocks {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}

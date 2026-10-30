@@ -125,6 +125,16 @@ impl HealthEntry {
     }
 }
 
+/// 模型目录接口可能与对话接口不同（如 OpenCode 的 inference 与 zen 分属两个面）
+pub fn models_base(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if let Some(index) = base.find("/inference/") {
+        // 官方文档：模型列表在 {host}/inference/v1/models，对话在 {host}/inference/openai/v1
+        return format!("{}/inference/v1", &base[..index]);
+    }
+    base.to_string()
+}
+
 /// 清洗供应商名称：剥掉装饰后缀并限制长度（防止 UI 文案落库）
 pub fn clean_name(name: &str) -> String {
     let mut text = name.trim().to_string();
@@ -143,6 +153,9 @@ pub fn clean_name(name: &str) -> String {
 /// 把连接错误翻译成能直接照着排查的中文诊断
 pub fn classify_error(message: &str) -> String {
     let lower = message.to_lowercase();
+    if lower.contains("free usage limit") || lower.contains("freeusagelimit") {
+        return "免费模型额度已用尽：需订阅 OpenCode Go 或改用付费模型".to_string();
+    }
     if message.contains("HTTP 401") || message.contains("HTTP 403") {
         "Key 无效或没有权限（HTTP 401/403）".to_string()
     } else if message.contains("HTTP 404") {
@@ -179,8 +192,32 @@ impl ExternalClient {
         Ok(Self { http })
     }
 
+    /// 以 Bearer 方式 GET 并解析 JSON（用于余额等只读查询）
+    pub async fn get_json(&self, url: &str, api_key: &str) -> Result<serde_json::Value> {
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(api_key)
+            .send()
+            .await
+            .map_err(|err| AppError::External(format!("请求失败：{err}")))?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::External(format!(
+                "HTTP {status}：{}",
+                body.chars().take(200).collect::<String>()
+            )));
+        }
+        response
+            .json()
+            .await
+            .map_err(|err| AppError::External(format!("响应解析失败：{err}")))
+    }
     pub async fn test(&self, provider: &ProviderSettings, api_key: &str) -> Result<()> {
-        let url = endpoint(&provider.base_url, "models");
+        // 模型列表接口可能与对话接口不同（如 OpenCode 的 inference 与 zen 分面）
+        let models_root = models_base(&provider.base_url);
+        let url = endpoint(&models_root, "models");
         let future = self.http.get(&url).bearer_auth(api_key).send();
         let response = tokio::time::timeout(TEST_TIMEOUT, future)
             .await
@@ -200,7 +237,8 @@ impl ExternalClient {
     /// 获取该 Provider 的模型列表（自动获取模型的底层实现）。
     /// 依次尝试 `{base}/models` 与 `{base}/v1/models`，兼容三种返回形态。
     pub async fn list_models(&self, base_url: &str, api_key: &str) -> Result<Vec<String>> {
-        let base = base_url.trim().trim_end_matches('/');
+        let models_root = models_base(base_url);
+        let base = models_root.as_str();
         if !(base.starts_with("http://") || base.starts_with("https://")) {
             return Err(AppError::External(
                 "Base URL 必须以 http:// 或 https:// 开头".to_string(),
@@ -300,17 +338,16 @@ impl ExternalClient {
                     "content": content
                 }))
                 .collect::<Vec<_>>(),
-            "stream": false,
+            "stream": true,
             "temperature": 0.3
         });
 
         let started = Instant::now();
-        let future = self
-            .http
-            .post(&url)
-            .bearer_auth(api_key)
-            .json(&payload)
-            .send();
+        let mut builder = self.http.post(&url).bearer_auth(api_key);
+        if url.contains("opencode.ai") {
+            builder = builder.header("x-opencode-session", opencode_session_id());
+        }
+        let future = builder.json(&payload).send();
         let response = tokio::time::timeout(CHAT_TIMEOUT, future)
             .await
             .map_err(|_| AppError::External("外部模型调用超时".to_string()))?
@@ -325,10 +362,54 @@ impl ExternalClient {
             )));
         }
 
-        let value: serde_json::Value = response
-            .json()
+        let raw = response
+            .text()
             .await
-            .map_err(|err| AppError::External(format!("解析外部模型响应失败：{err}")))?;
+            .map_err(|err| AppError::External(format!("读取外部模型响应失败：{err}")))?;
+
+        // 流式响应：逐行解析 data: 片段并拼接 delta.content
+        let value: serde_json::Value = if raw.contains("data:") {
+            let mut collected = String::new();
+            let mut model_name = String::new();
+            let mut usage_value = serde_json::Value::Null;
+            for line in raw.lines() {
+                let line = line.trim();
+                let Some(data) = line.strip_prefix("data:") else {
+                    continue;
+                };
+                let data = data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) else {
+                    continue;
+                };
+                if let Some(usage) = chunk.get("usage") {
+                    if usage.is_object() {
+                        usage_value = usage.clone();
+                    }
+                }
+                if let Some(name) = chunk.get("model").and_then(|item| item.as_str()) {
+                    if !name.is_empty() {
+                        model_name = name.to_string();
+                    }
+                }
+                if let Some(delta) = chunk
+                    .pointer("/choices/0/delta/content")
+                    .and_then(|item| item.as_str())
+                {
+                    collected.push_str(delta);
+                }
+            }
+            serde_json::json!({
+                "model": if model_name.is_empty() { model.to_string() } else { model_name },
+                "choices": [{ "message": { "content": collected } }],
+                "usage": usage_value
+            })
+        } else {
+            serde_json::from_str::<serde_json::Value>(&raw)
+                .map_err(|err| AppError::External(format!("解析外部模型响应失败：{err}")))?
+        };
 
         let content = extract_content(&value).ok_or_else(|| {
             AppError::External("外部模型响应缺少 choices[0].message.content".to_string())
@@ -641,6 +722,15 @@ fn error_chain(err: &dyn std::error::Error) -> String {
         current = next.source();
     }
     parts.join(" <- ")
+}
+
+/// OpenCode Go 要求每个请求携带 x-opencode-session，用于路由与计费归属
+fn opencode_session_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{:x}", nanos, std::process::id())
 }
 
 fn endpoint(base_url: &str, suffix: &str) -> String {

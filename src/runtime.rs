@@ -20,7 +20,9 @@ use crate::providers::{
 use crate::roles::{self, RoleSummary};
 use crate::router::RouterDecision;
 use crate::secrets;
-use crate::settings::{self, ProviderSettings, SaveSettingsResult, SettingsView, UserSettings};
+use crate::settings::{
+    self, ModelSetting, ProviderSettings, SaveSettingsResult, SettingsView, UserSettings,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -981,6 +983,28 @@ impl Runtime {
             .filter_map(|tool| tool.path.clone())
             .collect::<Vec<_>>();
 
+        // 本地用量记账：tokens 按字符数粗估（标"约"），费用恒为 0
+        {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_millis() as u64)
+                .unwrap_or(0);
+            let estimate_in = (message.chars().count() as u64).div_ceil(2);
+            let estimate_out = (content.chars().count() as u64).div_ceil(2);
+            let entry = crate::usage::UsageEntry {
+                ts: now_ms,
+                provider_id: "local".to_string(),
+                model_id: model.clone(),
+                tokens_in: estimate_in,
+                tokens_out: estimate_out,
+                cache_tokens: 0,
+                cost: 0.0,
+            };
+            if let Err(err) = crate::usage::record(&self.data_root, &entry) {
+                tracing::warn!(error = %err, "本地用量记账失败");
+            }
+        }
+
         if let Err(err) = self.session.append_to(
             role,
             &session_id,
@@ -1090,6 +1114,10 @@ impl Runtime {
                 .providers
                 .iter()
                 .any(|provider| provider.id == next.default_chat)
+            && !next
+                .external_models
+                .iter()
+                .any(|item| item.id == next.default_chat)
         {
             return Err(AppError::InvalidInput("默认对话模型不存在".to_string()));
         }
@@ -1478,6 +1506,149 @@ impl Runtime {
         }
     }
 
+    /// 测试单个外部模型（1-token 最小请求），结果写回可用模型目录
+    pub async fn test_external_model(&self, model_ref: &str) -> Result<String> {
+        let (provider, model) = self.resolve_model_target(model_ref)?;
+        let key = secrets::get(&self.data_root, &provider.id)
+            .ok_or_else(|| AppError::InvalidInput("该供应商未配置 API Key".to_string()))?;
+        let probe = vec![("user".to_string(), "hi".to_string())];
+        let result = self.providers.chat(&provider, &key, &model, &probe).await;
+
+        let mut settings = self.current_settings();
+        let mut classified = String::new();
+        if let Some(entry) = settings
+            .external_models
+            .iter_mut()
+            .find(|item| item.id == model_ref)
+        {
+            match &result {
+                Ok(_) => {
+                    entry.verified = true;
+                    entry.last_error.clear();
+                }
+                Err(err) => {
+                    classified = providers::classify_error(&err.to_string());
+                    tracing::warn!(model = %model_ref, provider = %provider.id, error = %err, "test_external_model failed");
+                    entry.verified = false;
+                    entry.last_error = classified.clone();
+                }
+            }
+        }
+        if let Err(err) = self.persist_settings(settings) {
+            tracing::warn!(error = %err, "记录模型测试结果失败");
+        }
+        match result {
+            Ok(_) => Ok("ok".to_string()),
+            Err(_) => Err(AppError::InvalidInput(classified)),
+        }
+    }
+
+    /// 把一次调用失败写回模型状态（由用户在弹窗里确认后触发）
+    pub fn record_model_error(&self, model_ref: &str, message: &str) -> Result<()> {
+        let mut settings = self.current_settings();
+        if let Some(entry) = settings
+            .external_models
+            .iter_mut()
+            .find(|item| item.id == model_ref)
+        {
+            entry.verified = false;
+            entry.last_error = providers::classify_error(message);
+            self.persist_settings(settings)?;
+        }
+        Ok(())
+    }
+    /// 查询 Go 套餐额度（滚动 5 小时 / 本周 / 本月）
+    pub async fn go_usage(&self, provider_id: &str) -> Result<serde_json::Value> {
+        let settings = self.current_settings();
+        let provider = settings
+            .providers
+            .iter()
+            .find(|item| item.id == provider_id)
+            .ok_or_else(|| AppError::InvalidInput("供应商不存在".to_string()))?;
+        let key = secrets::get(&self.data_root, provider_id)
+            .ok_or_else(|| AppError::InvalidInput("该供应商未配置 API Key".to_string()))?;
+        let url = "https://opencode.ai/zen/go/v1/usage";
+        tracing::info!(provider = provider.id, key_len = key.len(), url, "go usage request");
+        let value = match self.providers.get_json(url, &key).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(provider = provider.id, url, error = %err, "go usage failed");
+                return Err(err);
+            }
+        };
+        tracing::info!(provider = provider.id, body = %value, "go usage ok");
+        tracing::info!(provider = provider.id, "go usage fetched");
+        Ok(value)
+    }
+    /// 用量聚合：period = today | month | total
+    pub fn usage_summary(&self, period: &str, provider: Option<&str>) -> crate::usage::UsageSummary {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0);
+        crate::usage::summary_of(&self.data_root, period, now, provider)
+    }
+    /// 查询供应商余额（目前仅 DeepSeek 提供公开接口；其余返回 None）
+    pub async fn provider_balance(
+        &self,
+        provider_id: &str,
+    ) -> Result<(Option<f64>, String, String)> {
+        let settings = self.current_settings();
+        let provider = settings
+            .providers
+            .iter()
+            .find(|item| item.id == provider_id)
+            .ok_or_else(|| AppError::InvalidInput("供应商不存在".to_string()))?;
+        let key = secrets::get(&self.data_root, provider_id)
+            .ok_or_else(|| AppError::InvalidInput("该供应商未配置 API Key".to_string()))?;
+
+        if !provider.base_url.contains("api.deepseek.com") {
+            return Ok((None, String::new(), "该供应商未接入余额查询".to_string()));
+        }
+        let url = "https://api.deepseek.com/user/balance";
+        tracing::info!(provider = provider.id, key_len = key.len(), url, "balance request");
+        let value = match self.providers.get_json(url, &key).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(provider = provider.id, error = %err, "balance failed");
+                return Err(err);
+            }
+        };
+        let info = value
+            .pointer("/balance_infos/0")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let total = info
+            .get("total_balance")
+            .and_then(|item| item.as_str())
+            .and_then(|text| text.parse::<f64>().ok());
+        let currency = info
+            .get("currency")
+            .and_then(|item| item.as_str())
+            .unwrap_or("")
+            .to_string();
+        let note = if total.is_some() {
+            String::new()
+        } else {
+            "余额字段缺失".to_string()
+        };
+        Ok((total, currency, note))
+    }
+    /// 保存供应商显示顺序（可用模型页的卡片排序）
+    pub fn set_provider_order(&self, ids: Vec<String>) -> Result<()> {
+        let mut settings = self.current_settings();
+        settings.provider_order = ids;
+        self.persist_settings(settings)?;
+        Ok(())
+    }
+
+    /// 保存某个供应商内模型的显示顺序
+    pub fn set_model_order(&self, provider_id: &str, ids: Vec<String>) -> Result<()> {
+        let mut settings = self.current_settings();
+        settings.model_order.insert(provider_id.to_string(), ids);
+        self.persist_settings(settings)?;
+        Ok(())
+    }
     /// 清除某个 Provider 的加密密钥（保留 Provider 配置本身）
     pub fn clear_provider_key(&self, id: &str) -> Result<ProviderView> {
         let provider = self.find_provider(id)?;
@@ -1816,6 +1987,29 @@ impl Runtime {
         reply.role = role.to_string();
         // 记录一次云端调用（滑动窗口计数）
         self.record_cloud_call(&session_id);
+
+        // 本地用量记账（供「费用」页聚合；离线可用）
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_millis() as u64)
+            .unwrap_or(0);
+        let usage_entry = crate::usage::UsageEntry {
+            ts: now_ms,
+            provider_id: provider_id.to_string(),
+            model_id: reply.model.clone(),
+            tokens_in: reply
+                .usage
+                .as_ref()
+                .map(|item| item.prompt_tokens)
+                .filter(|value| *value > 0)
+                .unwrap_or(report.estimated_tokens as u64),
+            tokens_out: reply.usage.as_ref().map(|item| item.completion_tokens).unwrap_or(0),
+            cache_tokens: 0,
+            cost: 0.0,
+        };
+        if let Err(err) = crate::usage::record(&self.data_root, &usage_entry) {
+            tracing::warn!(error = %err, "用量记账失败");
+        }
 
         audit::event(
             &self.data_root,

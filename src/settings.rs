@@ -53,6 +53,33 @@ pub struct UserSettings {
     /// 本机实测成功过的供应商 id（实测过一次即视为已验证）
     #[serde(default)]
     pub verified_providers: Vec<String>,
+    /// 可用模型页的供应商显示顺序（含 local 之类的虚拟供应商）
+    #[serde(default)]
+    pub provider_order: Vec<String>,
+    /// 每个供应商内的模型显示顺序（providerId -> [modelId]），为空时按目录顺序
+    #[serde(default)]
+    pub model_order: std::collections::BTreeMap<String, Vec<String>>,
+    /// 每个角色上次选择的模型（roleId -> "local" 或 "provider:model"）
+    #[serde(default)]
+    pub role_models: std::collections::BTreeMap<String, String>,
+    /// 每个模型上次选择的推理等级（modelRef -> level）
+    #[serde(default)]
+    pub model_levels: std::collections::BTreeMap<String, String>,
+    /// 侧栏额度刷新间隔（分钟，1-60）
+    #[serde(default)]
+    pub usage_refresh_minutes: u32,
+    /// 侧栏费用卡片是否显示
+    #[serde(default = "default_true")]
+    pub usage_card_visible: bool,
+    /// 费用默认周期：day | month | total
+    #[serde(default)]
+    pub usage_period: String,
+    /// 展开的供应商额度卡（id 列表）
+    #[serde(default)]
+    pub usage_providers: Vec<String>,
+    /// 主界面额度卡片展示的供应商 id（空 = 跟随当前模型）
+    #[serde(default)]
+    pub usage_provider_id: String,
     /// 已应用的供应商预设版本（用于提示"预设有更新"）
     #[serde(default)]
     pub preset_version: u32,
@@ -71,6 +98,15 @@ impl Default for UserSettings {
             cloud: CloudSettings::default(),
             file_export_grants: Vec::new(),
             verified_providers: Vec::new(),
+            provider_order: Vec::new(),
+            model_order: Default::default(),
+            role_models: Default::default(),
+            model_levels: Default::default(),
+            usage_refresh_minutes: 5,
+            usage_card_visible: true,
+            usage_period: String::new(),
+            usage_providers: Vec::new(),
+            usage_provider_id: String::new(),
             preset_version: 0,
         }
     }
@@ -199,8 +235,23 @@ pub fn load(data_root: &Path, app: &AppConfig, models: &ModelsConfig) -> UserSet
     if settings.default_chat.trim().is_empty() {
         settings.default_chat = "local".to_string();
     }
+    if settings.usage_refresh_minutes == 0 {
+        settings.usage_refresh_minutes = 5;
+    }
+    settings.usage_refresh_minutes = settings.usage_refresh_minutes.clamp(1, 60);
     migrate_external_models(&mut settings);
+    clean_loaded_names(&mut settings);
     settings
+}
+
+/// 加载时清洗历史遗留的装饰后缀（海外 / 未实测 等曾被误写进名称）
+fn clean_loaded_names(settings: &mut UserSettings) {
+    for provider in &mut settings.providers {
+        provider.name = crate::providers::clean_name(&provider.name);
+    }
+    for model in &mut settings.external_models {
+        model.display_name = crate::providers::clean_name(&model.display_name);
+    }
 }
 
 /// 旧配置迁移：把 `providers[].defaultModel` 提升为独立的模型目录，并把 defaultChat 指向模型
@@ -300,7 +351,6 @@ pub fn normalize_external_models(settings: &mut UserSettings) {
 }
 
 pub fn save(data_root: &Path, mut settings: UserSettings) -> Result<UserSettings> {
-    migrate_external_models(&mut settings);
     normalize_external_models(&mut settings);
     if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
         settings.theme = "system".to_string();
@@ -512,7 +562,7 @@ mod tests {
             default_chat: "ghost:missing".to_string(),
             ..Default::default()
         };
-        migrate_external_models(&mut settings);
+        normalize_external_models(&mut settings);
         assert_eq!(settings.default_chat, "local");
     }
 }

@@ -29,23 +29,21 @@
             </section>
 
             <section class="sidebar-section usage-section">
-                <div class="section-head">
-                    <span class="section-title">云端供应商</span>
-                    <button id="usage-manage" class="link-btn" type="button">管理</button>
-                </div>
+
                 <div class="usage-card">
                     <div class="usage-row">
                         <span class="usage-dot"></span>
-                        <span id="usage-name" class="usage-name">未配置</span>
-                        <span id="usage-value" class="usage-value">0 tokens</span>
+                        <span class="usage-name">今日用量</span>
+                        <span id="usage-updated" class="usage-value">—</span>
                     </div>
-                    <div class="usage-hint">余额与用量接口待接入</div>
+                    <div id="usage-cloud-line" class="usage-line">云端 —</div>
+                    <div id="usage-local-line" class="usage-line">本地 —</div>
+                    <div id="usage-blocks" class="usage-blocks"></div>
                 </div>
             </section>
 
             <div class="sidebar-footer">
                 <button id="settings-btn" type="button" class="ghost">设置</button>
-                <button id="theme-btn" type="button" class="ghost">切换深色</button>
             </div>
         </aside>
 
@@ -91,17 +89,22 @@
                                 <div id="role-wheel-list" class="role-wheel-list" role="listbox" aria-label="选择角色"></div>
                             </div>
                         </div>
+
+                        <button id="clear-btn" type="button" class="ghost">清空当前对话</button>
+                    </div>
+                    <div class="composer-right">
                         <button id="local-only-btn" type="button" class="local-only on" aria-pressed="true"
                             title="仅本地：只跑本地模型；需要云端协助时会弹窗确认。点击切到自动模式">
                             <span class="dot"></span>仅本地
                         </button>
-                        <button id="clear-btn" type="button" class="ghost">清空当前对话</button>
-                    </div>
-                    <button id="send-btn" type="button" class="primary">发送</button>
+                        <button id="composer-model-btn" type="button" class="ghost composer-model" title="当前使用的模型">
+                            <span id="composer-model-label">本地模型</span>
+                        </button>
+                    </div>                    <button id="send-btn" type="button" class="primary">发送</button>
                 </div>
             </div>
 
-            <div id="status-bar">●3B 未连接 | 判定=- | 置信度=- | Mock 模式 | 0 Agents | 0 待确认 | 角色 dev | 0 条</div>
+            <div id="status-bar">●本地模型 | 判定=- | 置信度=- | Mock 模式 | 0 Agents | 0 待确认 | 角色 dev | 0 条</div>
         </main>
 
         <div id="permission-panel" role="dialog" aria-labelledby="perm-title" hidden>
@@ -163,6 +166,45 @@
                     <div class="role-form-actions">
                         <button id="onboarding-skip" type="button" class="ghost">跳过引导</button>
                         <button id="onboarding-next" type="button" class="primary">下一步</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="app-confirm-modal" class="modal" role="dialog" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong id="app-confirm-title">确认</strong>
+                </div>
+                <div class="settings-body">
+                    <p id="app-confirm-text" class="modal-note"></p>
+                </div>
+                <div class="settings-footer">
+                    <span class="settings-status"></span>
+                    <div class="role-form-actions">
+                        <button id="app-confirm-cancel" type="button" class="ghost">取消</button>
+                        <button id="app-confirm-ok" type="button" class="primary">确定</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="composer-model-modal" class="modal" role="dialog" hidden>
+            <div class="modal-card">
+                <div class="modal-head">
+                    <strong>选择模型</strong>
+                    <button id="composer-model-close" type="button" class="ghost">✕</button>
+                </div>
+                <div class="settings-body">
+                    <p class="modal-note">这里选的是当前角色使用的模型，切换角色会各自记住。</p>
+                    <div id="composer-mode-banner" class="composer-banner" hidden></div>
+                    <div id="composer-model-list" class="provider-list"></div>
+                    <div id="composer-level-row" class="composer-level-row" hidden></div>
+                </div>
+                <div class="settings-footer">
+                    <span class="settings-status"></span>
+                    <div class="role-form-actions">
+                        <button id="composer-model-cancel" type="button" class="ghost">取消</button>
                     </div>
                 </div>
             </div>
@@ -266,6 +308,8 @@
                     <button type="button" class="settings-tab" data-tab="roles">角色</button>
                     <button type="button" class="settings-tab" data-tab="data">数据</button>
                     <button type="button" class="settings-tab" data-tab="external">云端供应商</button>
+                            <button type="button" class="settings-tab" data-tab="available">可用模型</button>
+                            <button type="button" class="settings-tab" data-tab="usage">费用</button>
                 </div>
 
                 <div class="settings-body">
@@ -379,6 +423,59 @@
                         </form>
                     </section>
 
+                    <section class="settings-tab-panel" data-panel="available">
+                        <div class="settings-row">
+                            <div>
+                                <strong>可用模型</strong>
+                                <span class="settings-hint">在此调整模型显示顺序与启用状态。新增或删除请在「云端供应商 / 本地模型」中操作。</span>
+                            </div>
+                            <span id="available-summary" class="settings-status"></span>
+                        </div>
+                        <div id="available-model-list" class="available-list"></div>
+                    </section>
+
+                    <section class="settings-tab-panel" data-panel="usage">
+                        <div class="settings-row">
+                            <div>
+                                <strong>费用概览</strong>
+                                <span class="settings-hint">本地记账统计，离线可用。</span>
+                            </div>
+                            <span id="usage-updated" class="settings-status"></span>
+                        </div>
+                        <div class="usage-cards">
+                            <div class="usage-metric">
+                                <span class="usage-metric-label">今日</span>
+                                <span id="usage-today-cost" class="usage-metric-value">—</span>
+                                <span id="usage-today-detail" class="usage-metric-sub">—</span>
+                            </div>
+                            <div class="usage-metric">
+                                <span class="usage-metric-label">本月</span>
+                                <span id="usage-month-cost" class="usage-metric-value">—</span>
+                                <span id="usage-month-detail" class="usage-metric-sub">—</span>
+                            </div>
+                            <div class="usage-metric">
+                                <span class="usage-metric-label">累计</span>
+                                <span id="usage-total-cost" class="usage-metric-value">—</span>
+                                <span id="usage-total-detail" class="usage-metric-sub">—</span>
+                            </div>
+                        </div>
+                        <div class="settings-row" style="margin-top:14px">
+                            <div>
+                                <strong>供应商额度</strong>
+                                <span class="settings-hint">本期仅接入 DeepSeek（余额）与 OpenCode Go（额度），其余留待下个版本。</span>
+                            </div>
+                            <button id="usage-refresh" type="button" class="ghost">刷新</button>
+                        </div>
+                        <div id="usage-providers" class="usage-provider-list"></div>
+                        <div class="settings-row" style="margin-top:14px">
+                            <div>
+                                <strong>刷新间隔</strong>
+                                <span class="settings-hint">1–60 分钟，默认 5 分钟。</span>
+                            </div>
+                            <input id="usage-refresh-minutes" type="number" min="1" max="60" step="1" value="5">
+                        </div>
+                    </section>
+
                     <section class="settings-tab-panel" data-panel="data">
                         <div class="settings-block">
                             <div class="settings-row">
@@ -429,7 +526,7 @@
                         <div class="settings-row">
                             <div>
                                 <strong>云端模式</strong>
-                                <span class="settings-hint">仅云端会关闭本地 3B 路由与工具，全部走外部模型。</span>
+                                <span class="settings-hint">仅云端会关闭本地路由模型与工具，全部走外部模型。</span>
                             </div>
                             <select id="settings-cloud-mode">
                                 <option value="localFirst">本地优先（LocalFirst）</option>

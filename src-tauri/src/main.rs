@@ -378,6 +378,96 @@ async fn save_provider(
         .map_err(|err| err.to_string())
 }
 
+/// 知识库搜索（关键词 + 加权，零外部调用）
+#[tauri::command]
+fn kb_search(
+    state: State<'_, Arc<Runtime>>,
+    role: String,
+    query: String,
+) -> Vec<ai_assistant::kb::KbHit> {
+    ai_assistant::kb::search(&state.data_root, &role, &query, 20)
+}
+
+/// 知识库统计
+#[tauri::command]
+fn kb_stats(state: State<'_, Arc<Runtime>>, role: String) -> ai_assistant::kb::KbStats {
+    ai_assistant::kb::stats(&state.data_root, &role)
+}
+
+/// 查询 Go 套餐额度
+#[tauri::command]
+async fn go_usage(
+    state: State<'_, Arc<Runtime>>,
+    providerId: String,
+) -> Result<serde_json::Value, String> {
+    state.go_usage(&providerId).await.map_err(|err| err.to_string())
+}
+
+/// 费用聚合（today / month / total）
+#[tauri::command]
+fn usage_summary(
+    state: State<'_, Arc<Runtime>>,
+    period: String,
+    provider_id: Option<String>,
+) -> ai_assistant::usage::UsageSummary {
+    state.usage_summary(&period, provider_id.as_deref())
+}
+
+/// 查询供应商余额（DeepSeek 有公开接口，其余返回未接入）
+#[tauri::command]
+async fn provider_balance(
+    state: State<'_, Arc<Runtime>>,
+    providerId: String,
+) -> Result<(Option<f64>, String, String), String> {
+    state
+        .provider_balance(&providerId)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 保存供应商卡片顺序
+#[tauri::command]
+fn set_provider_order(state: State<'_, Arc<Runtime>>, ids: Vec<String>) -> Result<(), String> {
+    state.set_provider_order(ids).map_err(|err| err.to_string())
+}
+
+/// 保存某供应商内模型顺序
+#[tauri::command]
+fn set_model_order(
+    state: State<'_, Arc<Runtime>>,
+    provider_id: String,
+    ids: Vec<String>,
+) -> Result<(), String> {
+    state
+        .set_model_order(&provider_id, ids)
+        .map_err(|err| err.to_string())
+}
+
+/// 测试单个外部模型（结果写回可用模型目录）
+#[tauri::command]
+async fn test_external_model(
+    state: State<'_, Arc<Runtime>>,
+    model_id: String,
+) -> Result<String, String> {
+    tracing::info!(model = %model_id, "frontend requested test_external_model");
+    state
+        .test_external_model(&model_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// 把一次调用失败写回模型状态（用户确认后触发）
+#[tauri::command]
+fn record_model_error(
+    state: State<'_, Arc<Runtime>>,
+    model_id: String,
+    message: String,
+) -> Result<(), String> {
+    state
+        .record_model_error(&model_id, &message)
+        .map_err(|err| err.to_string())
+}
+
 /// 清除某个 Provider 的密钥（保留 Provider 配置）
 #[tauri::command]
 fn clear_provider_key(
@@ -933,6 +1023,7 @@ fn main() {
                     missing = ?report.missing_models,
                     "startup environment check"
                 );
+
                 runtime.warmup_router().await;
                 runtime.warmup_coordinator().await;
             });
@@ -984,6 +1075,15 @@ fn main() {
             list_providers,
             save_provider,
             clear_provider_key,
+            kb_search,
+            kb_stats,
+            go_usage,
+            usage_summary,
+            provider_balance,
+            set_provider_order,
+            set_model_order,
+            test_external_model,
+            record_model_error,
             delete_provider,
             test_provider,
             prepare_external,
